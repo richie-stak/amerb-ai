@@ -4,7 +4,10 @@ const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const { extractText, chunkText, isImageFile, imageMimeType } = require('../documentExtract');
-const { BANKWIDE_DEPARTMENT } = require('../departments');
+const { BANKWIDE_DEPARTMENT, DEPARTMENTS } = require('../departments');
+const { SCOPES, scopeOf, canAccessDoc, canDeleteDoc, searchableWhere } = require('../documentAccess');
+const { indexPendingChunks } = require('../embeddings');
+const { logAudit } = require('../audit');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -37,43 +40,79 @@ function currentUser(req) {
   return db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
 }
 
-// List documents visible to the current user: their own department, or all if admin.
+const DOC_COLUMNS = `d.id, d.user_id, d.filename, d.department, d.is_personal, d.mime_type, d.kind, d.char_count,
+  d.created_at, u.username AS uploaded_by`;
+
+function withScope(doc) {
+  return { ...doc, scope: scopeOf(doc) };
+}
+
+// List documents visible to the current user: bank-wide, their department's shared files, and
+// their own personal files. Admins see every document so they can manage them — except other
+// people's personal chat files, unless they ask for them with ?all=1 (the admin portal does).
 router.get('/', (req, res) => {
   const user = currentUser(req);
-  const rows =
-    user.role === 'admin'
-      ? db
-          .prepare(
-            `SELECT d.id, d.filename, d.department, d.mime_type, d.kind, d.char_count, d.created_at, u.username AS uploaded_by
-             FROM documents d JOIN users u ON u.id = d.user_id
-             ORDER BY d.created_at DESC`
-          )
-          .all()
-      : db
-          .prepare(
-            `SELECT d.id, d.filename, d.department, d.mime_type, d.kind, d.char_count, d.created_at, u.username AS uploaded_by
-             FROM documents d JOIN users u ON u.id = d.user_id
-             WHERE d.department = ? OR d.user_id = ? OR d.department = ?
-             ORDER BY d.created_at DESC`
-          )
-          .all(user.department || '__none__', user.id, BANKWIDE_DEPARTMENT);
-
-  res.json({ documents: rows });
+  let rows;
+  if (user.role === 'admin' && req.query.all === '1') {
+    rows = db.prepare(`SELECT ${DOC_COLUMNS} FROM documents d JOIN users u ON u.id = d.user_id ORDER BY d.created_at DESC`).all();
+  } else if (user.role === 'admin') {
+    rows = db
+      .prepare(
+        `SELECT ${DOC_COLUMNS} FROM documents d JOIN users u ON u.id = d.user_id
+         WHERE d.is_personal = 0 OR d.user_id = ? ORDER BY d.created_at DESC`
+      )
+      .all(user.id);
+  } else {
+    const where = searchableWhere(user);
+    rows = db
+      .prepare(`SELECT ${DOC_COLUMNS} FROM documents d JOIN users u ON u.id = d.user_id WHERE ${where.sql} ORDER BY d.created_at DESC`)
+      .all(...where.params);
+  }
+  res.json({ documents: rows.map(withScope) });
 });
+
+// Works out where an upload goes from the `scope` form field (plus `department` for an admin
+// uploading on a department's behalf). Returns { department, isPersonal } or { error, status }.
+function uploadTarget(user, body) {
+  // `bankwide=true` is the older form of scope=global, still accepted.
+  const scope = body.bankwide === 'true' ? 'global' : body.scope || 'personal';
+  if (!SCOPES.includes(scope)) return { error: `Unknown scope "${scope}"`, status: 400 };
+
+  if (scope === 'global') {
+    if (user.role !== 'admin') {
+      return { error: 'Only an admin can add documents to the bank-wide knowledge base.', status: 403 };
+    }
+    return { department: BANKWIDE_DEPARTMENT, isPersonal: false };
+  }
+
+  if (scope === 'department') {
+    const requested = typeof body.department === 'string' && body.department.trim();
+    if (requested && requested !== user.department) {
+      if (user.role !== 'admin') {
+        return { error: "You can only add documents to your own department's knowledge base.", status: 403 };
+      }
+      if (!DEPARTMENTS.includes(requested)) return { error: `Unknown department "${requested}"`, status: 400 };
+      return { department: requested, isPersonal: false };
+    }
+    if (!user.department) {
+      return { error: 'Your account has no department set. Ask an admin to assign one.', status: 400 };
+    }
+    return { department: user.department, isPersonal: false };
+  }
+
+  // Personal files still record the owner's department, purely for the admin's reporting.
+  return { department: user.department || 'General', isPersonal: true };
+}
 
 router.post('/', upload.array('files', 5), asyncHandler(async (req, res) => {
   const user = currentUser(req);
-  if (!user.department) {
-    return res.status(400).json({ error: 'Your account has no department set. Ask an admin to assign one.' });
-  }
   if (!req.files || !req.files.length) {
     return res.status(400).json({ error: 'No files were uploaded' });
   }
 
-  // Only an admin can publish to the bank-wide section — it's visible to every department,
-  // so it isn't something a regular department upload should be able to opt into.
-  const targetDepartment =
-    user.role === 'admin' && req.body.bankwide === 'true' ? BANKWIDE_DEPARTMENT : user.department;
+  const target = uploadTarget(user, req.body || {});
+  if (target.error) return res.status(target.status).json({ error: target.error });
+  const targetDepartment = target.department;
 
   const path = require('node:path');
   const results = [];
@@ -109,11 +148,12 @@ router.post('/', upload.array('files', 5), asyncHandler(async (req, res) => {
 
       const docResult = db
         .prepare(
-          'INSERT INTO documents (user_id, department, filename, mime_type, kind, image_data, file_data, char_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+          'INSERT INTO documents (user_id, department, is_personal, filename, mime_type, kind, image_data, file_data, char_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
         )
         .run(
           user.id,
           targetDepartment,
+          target.isPersonal ? 1 : 0,
           file.originalname,
           isImage ? imageMimeType(file.originalname, file.mimetype) : file.mimetype || '',
           kind,
@@ -133,6 +173,7 @@ router.post('/', upload.array('files', 5), asyncHandler(async (req, res) => {
         id: docResult.lastInsertRowid,
         filename: file.originalname,
         department: targetDepartment,
+        scope: target.isPersonal ? 'personal' : targetDepartment === BANKWIDE_DEPARTMENT ? 'global' : 'department',
         kind,
         charCount: text.length,
       });
@@ -141,6 +182,13 @@ router.post('/', upload.array('files', 5), asyncHandler(async (req, res) => {
     }
   }
 
+  // Make the new files searchable by meaning straight away rather than at the next background pass.
+  indexPendingChunks();
+  logAudit(req, 'document.upload', {
+    scope: target.isPersonal ? 'personal' : targetDepartment === BANKWIDE_DEPARTMENT ? 'global' : 'department',
+    department: targetDepartment,
+    files: results.map((r) => (r.error ? `${r.filename} (failed: ${r.error})` : r.filename)),
+  }, user);
   res.json({ results });
 }));
 
@@ -157,15 +205,6 @@ router.get('/:id/image', (req, res) => {
   res.setHeader('Cache-Control', 'private, max-age=3600');
   res.send(Buffer.from(doc.image_data, 'base64'));
 });
-
-function canAccessDoc(doc, user) {
-  return (
-    user.role === 'admin' ||
-    doc.user_id === user.id ||
-    doc.department === user.department ||
-    doc.department === BANKWIDE_DEPARTMENT
-  );
-}
 
 function chunkTextFor(documentId) {
   const chunks = db
@@ -250,11 +289,45 @@ router.delete('/:id', (req, res) => {
   const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Document not found' });
 
-  const canDelete = user.role === 'admin' || doc.user_id === user.id;
-  if (!canDelete) return res.status(403).json({ error: 'Not authorized to delete this document' });
+  if (!canDeleteDoc(doc, user)) {
+    const reason =
+      scopeOf(doc) === 'global'
+        ? 'Only an admin can remove bank-wide documents.'
+        : 'Only the person who uploaded this document (or an admin) can delete it.';
+    return res.status(403).json({ error: reason });
+  }
 
   db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
+  logAudit(req, 'document.delete', { documentId: doc.id, filename: doc.filename, scope: scopeOf(doc), department: doc.department }, user);
   res.json({ ok: true });
+});
+
+// Shares one of your personal files (a chat attachment or AI-generated file) with your whole
+// department, moving it into the department knowledge base. Admins may share anyone's file, or
+// publish it bank-wide with { scope: 'global' }.
+router.patch('/:id/share', (req, res) => {
+  const user = currentUser(req);
+  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'Document not found' });
+  if (doc.user_id !== user.id && user.role !== 'admin') {
+    return res.status(403).json({ error: 'You can only share your own files.' });
+  }
+
+  const scope = (req.body && req.body.scope) || 'department';
+  if (scope === 'global') {
+    if (user.role !== 'admin') return res.status(403).json({ error: 'Only an admin can publish documents bank-wide.' });
+    db.prepare('UPDATE documents SET is_personal = 0, department = ? WHERE id = ?').run(BANKWIDE_DEPARTMENT, doc.id);
+  } else if (scope === 'department') {
+    const owner = db.prepare('SELECT department FROM users WHERE id = ?').get(doc.user_id);
+    const department = owner?.department;
+    if (!department) return res.status(400).json({ error: 'This file\'s owner has no department to share it with.' });
+    db.prepare('UPDATE documents SET is_personal = 0, department = ? WHERE id = ?').run(department, doc.id);
+  } else {
+    return res.status(400).json({ error: 'scope must be "department" or "global"' });
+  }
+  const updated = db.prepare('SELECT * FROM documents WHERE id = ?').get(doc.id);
+  logAudit(req, 'document.share', { documentId: doc.id, filename: doc.filename, from: scopeOf(doc), to: scopeOf(updated), department: updated.department }, user);
+  res.json({ ok: true, scope: scopeOf(updated), department: updated.department });
 });
 
 module.exports = router;

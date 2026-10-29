@@ -1,5 +1,6 @@
 const db = require('./db');
-const { BANKWIDE_DEPARTMENT } = require('./departments');
+const { canAccessDoc, searchableWhere } = require('./documentAccess');
+const { semanticSearch } = require('./embeddings');
 
 const MAX_EXPLICIT_CHARS_PER_DOC = 8000;
 const MAX_AUTO_CHUNKS = 4;
@@ -10,6 +11,20 @@ const STOPWORDS = new Set([
   'about', 'into', 'your', 'you', 'can', 'does', 'did', 'has', 'a', 'an', 'of',
   'to', 'in', 'on', 'is', 'it', 'as', 'be', 'or', 'at', 'by',
 ]);
+
+// Words in a question that say nothing about *which* document is wanted: the bank's own name
+// (it's on nearly every bank document, so "search about Amenfiman Community Bank" used to match a
+// loan form and the logo) and the instructions around a request ("search ... on google").
+const QUERY_NOISE = new Set([
+  'amenfiman', 'community', 'bank', 'banks', 'rural', 'plc', 'amerb',
+  'search', 'google', 'online', 'web', 'internet', 'website', 'please', 'tell', 'find', 'look',
+  'information', 'info', 'know', 'give', 'show', 'want', 'need', 'help',
+]);
+
+// A query word found in more than this share of the searchable documents doesn't tell them apart
+// (like "loan" in a loans-only knowledge base), so it isn't counted as a match on its own.
+const COMMON_TERM_SHARE = 0.5;
+const COMMON_TERM_MIN_DOCS = 4;
 
 function tokenize(text) {
   return (text.toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((w) => !STOPWORDS.has(w));
@@ -23,13 +38,7 @@ function getExplicitContext(documentIds, user) {
   const docs = db
     .prepare(`SELECT * FROM documents WHERE id IN (${placeholders})`)
     .all(...documentIds)
-    .filter(
-      (d) =>
-        user.role === 'admin' ||
-        d.user_id === user.id ||
-        d.department === user.department ||
-        d.department === BANKWIDE_DEPARTMENT
-    );
+    .filter((d) => canAccessDoc(d, user));
 
   if (!docs.length) return { text: '', docs: [] };
 
@@ -58,34 +67,43 @@ function getExplicitContext(documentIds, user) {
   return { text: parts.join('\n\n'), docs };
 }
 
-// Lightweight keyword-overlap retrieval across the user's department knowledge base.
-// Returns both the context text (for the model) and the distinct source documents used
-// (for citations shown to the user) — the same retrieval pass answers both needs.
-function getAutoContext(department, query, excludeDocumentIds = []) {
-  const queryTerms = new Set(tokenize(query));
-  if (!queryTerms.size) return { text: '', sources: [] };
+// Keyword-overlap retrieval across every knowledge base this user may search: the bank-wide one,
+// their own department's, and their own personal files (never another department's). Returns the
+// best-matching chunks, most relevant first.
+function keywordChunks(user, query, excludeDocumentIds = []) {
+  let queryTerms = new Set(tokenize(query).filter((w) => !QUERY_NOISE.has(w)));
+  if (!queryTerms.size) return [];
 
   const excludeSet = new Set(excludeDocumentIds);
+  const where = searchableWhere(user);
   const rows = db
     .prepare(
-      `SELECT dc.content, dc.heading, dc.document_id, d.filename, d.kind
+      `SELECT dc.id AS chunk_id, dc.content, dc.heading, dc.document_id, d.filename, d.kind
        FROM document_chunks dc
        JOIN documents d ON d.id = dc.document_id
-       WHERE d.department = ? OR d.department = ?`
+       WHERE ${where.sql}`
     )
-    .all(department || '__none__', BANKWIDE_DEPARTMENT)
+    .all(...where.params)
     .filter((r) => !excludeSet.has(r.document_id));
 
-  if (!rows.length) return { text: '', sources: [] };
+  if (!rows.length) return [];
+
+  const termsByChunk = rows.map((r) => new Set(tokenize(r.content)));
+  const documentIds = new Set(rows.map((r) => r.document_id));
+  if (documentIds.size >= COMMON_TERM_MIN_DOCS) {
+    const docsWithTerm = (term) => new Set(rows.filter((_, i) => termsByChunk[i].has(term)).map((r) => r.document_id)).size;
+    queryTerms = new Set([...queryTerms].filter((term) => docsWithTerm(term) / documentIds.size <= COMMON_TERM_SHARE));
+    if (!queryTerms.size) return [];
+  }
 
   // Require a real chunk of the query's distinct keywords to show up, not just one incidental
   // word in common — a single shared term between a 2-word query and an unrelated 40-page PDF is
   // noise, not a match, and was previously enough to drag irrelevant documents into every answer.
   const minMatches = queryTerms.size === 1 ? 1 : Math.max(2, Math.ceil(queryTerms.size / 2));
 
-  const scored = rows
-    .map((r) => {
-      const chunkTermSet = new Set(tokenize(r.content));
+  return rows
+    .map((r, i) => {
+      const chunkTermSet = termsByChunk[i];
       let score = 0;
       for (const term of queryTerms) {
         if (chunkTermSet.has(term)) score += 1;
@@ -95,13 +113,15 @@ function getAutoContext(department, query, excludeDocumentIds = []) {
     .filter((r) => r.score >= minMatches)
     .sort((a, b) => b.score - a.score)
     .slice(0, MAX_AUTO_CHUNKS);
+}
 
-  if (!scored.length) return { text: '', sources: [] };
-
+// Turns retrieved chunks into the context text the model reads and the citations the user sees —
+// the same pass answers both needs.
+function formatContext(chunks) {
   let total = 0;
   const parts = [];
   const sourcesById = new Map();
-  for (const chunk of scored) {
+  for (const chunk of chunks) {
     if (total >= MAX_AUTO_CHARS) break;
     const heading = chunk.heading ? ` — ${chunk.heading}` : '';
     const analyzeHint = chunk.kind === 'xlsx' ? ', use analyze_excel for real calculations' : '';
@@ -109,8 +129,22 @@ function getAutoContext(department, query, excludeDocumentIds = []) {
     total += chunk.content.length;
     sourcesById.set(chunk.document_id, { id: chunk.document_id, filename: chunk.filename, kind: chunk.kind });
   }
-
   return { text: parts.join('\n\n'), sources: [...sourcesById.values()] };
 }
 
-module.exports = { getExplicitContext, getAutoContext };
+// Keyword-only retrieval (no model needed).
+function getAutoContext(user, query, excludeDocumentIds = []) {
+  return formatContext(keywordChunks(user, query, excludeDocumentIds));
+}
+
+// What chat uses: passages that match by meaning (via the local embedding model) first, then
+// exact keyword matches the meaning search missed — names, account codes and figures match best
+// by keyword. Falls back to keywords alone when the embedding model isn't installed.
+async function getHybridContext(user, query, excludeDocumentIds = []) {
+  const byMeaning = await semanticSearch(user, query, { exclude: excludeDocumentIds, limit: MAX_AUTO_CHUNKS });
+  const seen = new Set(byMeaning.map((c) => c.chunk_id));
+  const byKeyword = keywordChunks(user, query, excludeDocumentIds).filter((c) => !seen.has(c.chunk_id));
+  return formatContext([...byMeaning, ...byKeyword].slice(0, MAX_AUTO_CHUNKS + 1));
+}
+
+module.exports = { getExplicitContext, getAutoContext, getHybridContext };

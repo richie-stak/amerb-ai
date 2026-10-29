@@ -11,7 +11,7 @@ router.use(requireAuth);
 router.get('/', (req, res) => {
   const rows = db
     .prepare(
-      'SELECT id, title, model, created_at, updated_at FROM conversations WHERE user_id = ? ORDER BY updated_at DESC'
+      'SELECT id, title, model, pinned, created_at, updated_at FROM conversations WHERE user_id = ? ORDER BY pinned DESC, updated_at DESC'
     )
     .all(req.session.userId);
   res.json({ conversations: rows });
@@ -129,17 +129,29 @@ router.get('/:id/export', asyncHandler(async (req, res) => {
 }));
 
 // Rename a conversation
+// Rename and/or pin a conversation — either field can be sent on its own.
 router.patch('/:id', (req, res) => {
-  const { title } = req.body || {};
-  if (typeof title !== 'string' || !title.trim()) {
-    return res.status(400).json({ error: 'Title is required' });
+  const { title, pinned } = req.body || {};
+  if (title !== undefined && (typeof title !== 'string' || !title.trim())) {
+    return res.status(400).json({ error: 'Title cannot be empty' });
+  }
+  if (pinned !== undefined && typeof pinned !== 'boolean') {
+    return res.status(400).json({ error: 'pinned must be true or false' });
+  }
+  if (title === undefined && pinned === undefined) {
+    return res.status(400).json({ error: 'Nothing to update' });
   }
   const convo = db
     .prepare('SELECT id FROM conversations WHERE id = ? AND user_id = ?')
     .get(req.params.id, req.session.userId);
   if (!convo) return res.status(404).json({ error: 'Conversation not found' });
 
-  db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(title.trim().slice(0, 200), convo.id);
+  if (title !== undefined) {
+    db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(title.trim().slice(0, 200), convo.id);
+  }
+  if (pinned !== undefined) {
+    db.prepare('UPDATE conversations SET pinned = ? WHERE id = ?').run(pinned ? 1 : 0, convo.id);
+  }
   res.json({ ok: true });
 });
 

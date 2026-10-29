@@ -9,6 +9,8 @@ const db = require('../db');
 const { requireAdmin } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const { DEPARTMENTS } = require('../departments');
+const { destroyUserSessions } = require('../sessionStore');
+const { auditAdminChanges, queryAudit, ACTION_GROUPS } = require('../audit');
 
 // Excludes visually-ambiguous characters (0/O, 1/l/I) so a temporary password read aloud or typed
 // from a screen doesn't trip people up.
@@ -23,6 +25,8 @@ function generateTempPassword(length = 12) {
 
 const router = express.Router();
 router.use(requireAdmin);
+// Every admin change (anything but a read) goes into the audit log automatically.
+router.use(auditAdminChanges);
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
 
@@ -87,6 +91,7 @@ router.delete('/users/:id', (req, res) => {
   }
 
   db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
+  destroyUserSessions(targetId);
   res.json({ ok: true });
 });
 
@@ -105,6 +110,9 @@ router.post('/users/:id/reset-password', asyncHandler(async (req, res) => {
     hash,
     targetId
   );
+  // Sessions now survive restarts, so an old login must not outlive a reset — e.g. one left open
+  // on a shared PC is exactly why an admin resets a password.
+  destroyUserSessions(targetId);
 
   res.json({ ok: true, tempPassword });
 }));
@@ -325,11 +333,18 @@ router.get('/settings', (req, res) => {
     searchRestricted: getSetting('search_restricted', 'false') === 'true',
     houseModel: getHouseModel(),
     retentionDays: Number(getSetting('retention_days', '0')) || 0,
+    externalRedaction: getSetting('external_redaction', 'true') !== 'false',
   });
 });
 
 router.post('/settings', (req, res) => {
-  const { webSearchEnabled, searchRestricted, retentionDays } = req.body || {};
+  const { webSearchEnabled, searchRestricted, retentionDays, externalRedaction } = req.body || {};
+  if (externalRedaction !== undefined) {
+    if (typeof externalRedaction !== 'boolean') {
+      return res.status(400).json({ error: 'externalRedaction must be true or false' });
+    }
+    setSetting('external_redaction', externalRedaction ? 'true' : 'false');
+  }
   if (webSearchEnabled !== undefined) {
     if (typeof webSearchEnabled !== 'boolean') {
       return res.status(400).json({ error: 'webSearchEnabled must be true or false' });
@@ -562,5 +577,31 @@ router.post('/users/import', asyncHandler(async (req, res) => {
 
   res.json({ created, skipped });
 }));
+
+// ---------- Audit log (read-only — there is deliberately no way to edit or clear it) ----------
+
+router.get('/audit', (req, res) => {
+  const { user, action, from, to, limit, offset } = req.query;
+  res.json({ ...queryAudit({ user, action, from, to, limit, offset }), groups: ACTION_GROUPS });
+});
+
+function csvCell(value) {
+  const text = value == null ? '' : String(value);
+  // Leading = + - @ would be run as a formula when the CSV is opened in Excel — neutralise them.
+  const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
+
+router.get('/audit/export.csv', (req, res) => {
+  const { user, action, from, to } = req.query;
+  const { rows } = queryAudit({ user, action, from, to, limit: 5000 });
+  const lines = [['Time (UTC)', 'User', 'Department', 'Action', 'Details', 'IP address'].join(',')];
+  for (const r of rows) {
+    lines.push([r.at, r.username, r.department, r.action, JSON.stringify(r.details), r.ip].map(csvCell).join(','));
+  }
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="amerb-audit-log-${new Date().toISOString().slice(0, 10)}.csv"`);
+  res.send(`﻿${lines.join('\r\n')}`);
+});
 
 module.exports = router;

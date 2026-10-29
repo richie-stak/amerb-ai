@@ -12,8 +12,12 @@ function formatValue(value) {
   return value === undefined ? '(no output)' : math.format(value, { precision: 14 });
 }
 
+// Models trained mostly on Python/JS habitually write `**` for powers, which mathjs rejects as a
+// syntax error — translate it to mathjs's `^` rather than failing an otherwise correct formula.
+const code = String(workerData.code).replace(/\*\*/g, '^');
+
 try {
-  const result = math.evaluate(workerData.code);
+  const result = math.evaluate(code);
   let output;
   if (result && Array.isArray(result.entries)) {
     output = result.entries.map(formatValue).join('\n');

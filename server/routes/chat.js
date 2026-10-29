@@ -2,21 +2,65 @@ const express = require('express');
 const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
-const { getExplicitContext, getAutoContext } = require('../retrieval');
+const { getExplicitContext, getHybridContext } = require('../retrieval');
 const { TOOL_DEFS, executeTool, webSearch } = require('../tools');
 const { isWebSearchEnabled, getHouseModel } = require('../settings');
+const { addMemory, memoryPrompt } = require('../memory');
+const llm = require('../llm');
+const { logAudit } = require('../audit');
 
 const router = express.Router();
 router.use(requireAuth);
 
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
 const MAX_TOOL_ROUNDS = 4;
+// Room left in the context window for the model's own reply, and for the tool schemas it's offered.
+const REPLY_RESERVE_TOKENS = 2048;
+const TOOL_DEFS_TOKENS = Math.ceil(JSON.stringify(TOOL_DEFS).length / 3.5);
+
+// A rough token estimate (~3.5 characters per token for English) — close enough to budget a
+// context window without shipping a tokenizer for every model.
+function estimateTokens(text) {
+  return Math.ceil((text || '').length / 3.5);
+}
+
+// Sending the full history of a long chat eventually overflows the context window, and the model
+// then silently loses the *oldest* tokens — which are the system prompt and retrieved documents.
+// Instead, keep every system message and as many of the most recent turns as fit, always
+// including the latest user message, and tell the model when earlier turns were left out.
+function fitHistoryToContext(systemMessages, history, withTools, contextTokens) {
+  const budget = contextTokens - REPLY_RESERVE_TOKENS - (withTools ? TOOL_DEFS_TOKENS : 0);
+  const systemTokens = systemMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+  let remaining = budget - systemTokens;
+  const kept = [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const cost = estimateTokens(history[i].content) + 4;
+    if (kept.length && cost > remaining) break;
+    kept.unshift(history[i]);
+    remaining -= cost;
+  }
+  if (kept.length < history.length) {
+    return [
+      ...systemMessages,
+      {
+        role: 'system',
+        content:
+          `Note: the ${history.length - kept.length} earliest messages of this conversation were left out to fit ` +
+          'your memory limit. If the user refers to something you cannot see, ask them to repeat the detail.',
+      },
+      ...kept,
+    ];
+  }
+  return [...systemMessages, ...kept];
+}
 
 // Small local models are unreliable about deciding on their own to call web_search — so besides
 // the explicit globe-icon toggle, catch the common phrasings staff actually type when they mean
 // "look this up online" (e.g. "go to online", "search online", "check online") and force a real
 // search the same deterministic way the toggle does, instead of hoping the model notices.
 const ONLINE_SEARCH_INTENT = /\b(go(?:es|ing)?\s*(?:to\s*)?online|search(?:ing)?\s*online|look(?:ing)?\s*(?:it\s*)?up\s*online|check(?:ing)?\s*online|browse\s*(?:the\s*)?(?:internet|web)|on\s*the\s*internet|google\s*(?:it|this|that)?)\b/i;
+
+// "remember (that) X", "please remember X", "don't forget (that) X" — the part after is the fact.
+const REMEMBER_INTENT = /^(?:please\s+|can you\s+|could you\s+)?(?:remember|don'?t forget|do not forget)(?:\s+that)?[,:]?\s+(.{3,300})$/is;
 
 function sendEvent(res, event, data) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -31,25 +75,21 @@ function makeTitle(content) {
 // the same way ChatGPT/Claude replace "New chat" with something legible shortly after you send
 // the first message. Best-effort: a slow or malformed reply just leaves the original truncated-
 // message title in place, so failures here are silent by design.
-async function generateTitle(model, userContent, assistantContent) {
+async function generateTitle(model, userContent, assistantContent, capabilities) {
   const prompt =
     'Reply with ONLY a short title (3-6 words, no quotes, no punctuation at the end) that summarizes ' +
     "this exchange. Nothing else — not even a lead-in phrase.\n\n" +
     `User: ${userContent.slice(0, 500)}\n` +
     `Assistant: ${assistantContent.slice(0, 500)}`;
   try {
-    const r = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: prompt }],
-        stream: false,
-      }),
+    const reply = await llm.completeChat(model, {
+      messages: [{ role: 'user', content: prompt }],
+      // A title never needs reasoning, and a short cap stops a rambling model from holding up
+      // the request for a full-length answer nobody will read.
+      ...(capabilities?.thinking ? { think: false } : {}),
+      maxTokens: 32,
     });
-    if (!r.ok) return null;
-    const data = await r.json();
-    let title = (data.message?.content || '').trim();
+    let title = (reply.content || '').trim();
     // Small models sometimes wrap thinking tags around the answer even without `think: true` — strip them.
     title = title.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     title = title.replace(/^["'“”]+|["'“”]+$/g, '').trim();
@@ -67,26 +107,12 @@ function normalizeModelName(name) {
   return name.includes(':') ? name : `${name}:latest`;
 }
 
-async function getModelCapabilities(model) {
-  try {
-    const r = await fetch(`${OLLAMA_URL}/api/tags`);
-    if (!r.ok) return { vision: false, tools: false, thinking: false };
-    const data = await r.json();
-    const target = normalizeModelName(model);
-    const entry = (data.models || []).find((m) => normalizeModelName(m.name) === target);
-    const caps = entry?.capabilities || [];
-    return { vision: caps.includes('vision'), tools: caps.includes('tools'), thinking: caps.includes('thinking') };
-  } catch {
-    return { vision: false, tools: false, thinking: false };
-  }
-}
-
 // Shared by /stream (a fresh user message was just inserted) and /regenerate (the conversation's
 // last message is already a user message, either unchanged or freshly edited) — everything from
 // context retrieval through streaming the assistant's reply and saving it lives here once.
 async function runAssistantTurn(
   res,
-  { convo, user, model, documentIds, lastUserContent, userMessageId, forceWebSearch, isNewConversation, supersedeMessageId }
+  { convo, user, model, documentIds, lastUserContent, userMessageId, forceWebSearch, think, isNewConversation, supersedeMessageId }
 ) {
   const cleanDocIds = Array.isArray(documentIds) ? documentIds.filter((id) => Number.isInteger(id)) : [];
   const { text: explicitContext, docs: attachedDocs } = getExplicitContext(cleanDocIds, user);
@@ -113,8 +139,8 @@ async function runAssistantTurn(
 
   // Only auto-retrieved sources become "citations" — explicitly attached documents are already
   // visible as attachment chips on the user's own message, so citing them again would be noise.
-  const { text: autoContext, sources: citations } = getAutoContext(
-    user.department,
+  const { text: autoContext, sources: citations } = await getHybridContext(
+    user,
     lastUserContent,
     attachedDocs.map((d) => d.id)
   );
@@ -130,7 +156,13 @@ async function runAssistantTurn(
         'calculation, or a document. For greetings, small talk, or anything you can already answer yourself, ' +
         'just reply normally without calling a tool. If the user mentions a term, acronym, or abbreviation you ' +
         "don't recognize (for example a regulator, organization, or product name — like \"BoG\" for Bank of " +
-        'Ghana), use the web_search tool to look it up before assuming it is invalid or asking for clarification.',
+        'Ghana), use the web_search tool to look it up before assuming it is invalid or asking for clarification. ' +
+        'For any figure you report (repayments, interest, totals, percentages), compute it with the run_code ' +
+        'calculator rather than in your head. Loan repayments are amortized (equal monthly instalments: ' +
+        'P*r*(1+r)^n / ((1+r)^n - 1), with r the monthly rate) unless the user says the loan is flat-rate. ' +
+        'Format answers with Markdown: headings and bullet points where they help, tables for row/column data, ' +
+        'fenced code blocks with a language tag for code, and $...$ / $$...$$ for mathematical formulas. ' +
+        `Today's date is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}.`,
     },
   ];
   // A house model's persona is baked into Ollama as a default SYSTEM prompt, but Ollama drops that
@@ -150,6 +182,8 @@ async function runAssistantTurn(
         user.custom_instructions.trim(),
     });
   }
+  const memoryBlock = memoryPrompt(user.id);
+  if (memoryBlock) systemMessages.push({ role: 'system', content: memoryBlock });
   if (contextBlocks.length) {
     systemMessages.push({
       role: 'system',
@@ -164,9 +198,15 @@ async function runAssistantTurn(
         contextBlocks.join('\n\n'),
     });
   }
-  const messagesForModel = [...systemMessages, ...history];
-
-  const capabilities = await getModelCapabilities(model);
+  const capabilities = await llm.getCapabilities(model);
+  const messagesForModel = fitHistoryToContext(systemMessages, history, capabilities.tools, llm.contextTokens(model));
+  // Reasoning ("thinking") models are far slower on CPU when they reason first, so it's opt-in per
+  // message via the composer's Think toggle — and must be sent as an explicit false to turn off,
+  // since thinking-capable models in Ollama reason by default.
+  const thinkFlag = capabilities.thinking ? { think: Boolean(think) } : {};
+  // The behind-the-scenes correction passes below are short, mechanical follow-ups — never worth
+  // the extra wait of reasoning first.
+  const thinkOff = capabilities.thinking ? { think: false } : {};
 
   if (imageDocs.length && capabilities.vision) {
     const lastMessage = messagesForModel[messagesForModel.length - 1];
@@ -256,96 +296,83 @@ async function runAssistantTurn(
       }
     }
 
-    // Tool-calling round-trip: only engaged for models that advertise tool support, and
-    // capped at a small number of rounds so a confused model can't loop forever.
-    if (capabilities.tools) {
-      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-        const toolRes = await fetch(`${OLLAMA_URL}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model, messages: messagesForModel, tools: TOOL_DEFS, stream: false }),
-          signal: controller.signal,
-        });
-        if (!toolRes.ok) throw new Error(`Ollama responded with status ${toolRes.status}`);
-        const toolData = await toolRes.json();
-        const toolCalls = toolData.message?.tool_calls;
-
-        if (!toolCalls || !toolCalls.length) break;
-
-        messagesForModel.push(toolData.message);
-
-        for (const call of toolCalls) {
-          const toolName = call.function?.name;
-          const toolArgs = call.function?.arguments || {};
-          sendEvent(res, 'tool', { name: toolName, args: toolArgs, status: 'running' });
-
-          const { text: resultText, meta } = await executeTool(toolName, toolArgs, toolContext);
-
-          if (toolName === 'web_search') searchedThisTurn = true;
-
-          sendEvent(res, 'tool', { name: toolName, args: toolArgs, status: 'done', result: resultText.slice(0, 500) });
-          messagesForModel.push({ role: 'tool', content: resultText, tool_name: toolName });
-
-          if (meta?.documentId) {
-            generatedAttachments.push({ id: meta.documentId, filename: meta.filename, kind: meta.kind });
-            const eventName = meta.kind === 'image' ? 'image' : 'document';
-            sendEvent(res, eventName, { documentId: meta.documentId, filename: meta.filename, kind: meta.kind });
-          }
+    // One streamed call per round: reply text appears in the browser as soon as the model starts
+    // writing, and any tool calls it makes are executed and fed back for another round. Tools are
+    // only offered to models that advertise support, and the last round withholds them so a
+    // confused model can't loop forever and always ends on a real answer.
+    let separatorPending = false;
+    const streamHandlers = {
+      onThinking: (delta) => sendEvent(res, 'thinking', { delta }),
+      onContent: (delta) => {
+        // Text written before a tool call and text written after it are separate paragraphs.
+        if (separatorPending) {
+          full += '\n\n';
+          sendEvent(res, 'token', { delta: '\n\n' });
+          separatorPending = false;
         }
-      }
-    }
-
-    const ollamaRes = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
+        full += delta;
+        sendEvent(res, 'token', { delta });
+      },
+    };
+    for (let round = 0; ; round++) {
+      const offerTools = capabilities.tools && round < MAX_TOOL_ROUNDS;
+      const turn = await llm.streamChat(model, {
         messages: messagesForModel,
-        stream: true,
-        ...(capabilities.thinking ? { think: true } : {}),
-      }),
-      signal: controller.signal,
-    });
+        tools: offerTools ? TOOL_DEFS : undefined,
+        ...thinkFlag,
+        signal: controller.signal,
+        ...streamHandlers,
+      });
+      thinkingFull += turn.thinking;
+      if (!turn.toolCalls.length) break;
 
-    if (!ollamaRes.ok || !ollamaRes.body) {
-      throw new Error(`Ollama responded with status ${ollamaRes.status}`);
-    }
+      messagesForModel.push({ role: 'assistant', content: turn.content, tool_calls: turn.toolCalls });
+      if (full) separatorPending = true;
 
-    const reader = ollamaRes.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+      for (const call of turn.toolCalls) {
+        const toolName = call.function?.name;
+        const toolArgs = call.function?.arguments || {};
+        sendEvent(res, 'tool', { name: toolName, args: toolArgs, status: 'running' });
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+        const { text: resultText, meta } = await executeTool(toolName, toolArgs, toolContext);
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+        if (toolName === 'web_search') searchedThisTurn = true;
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const chunk = JSON.parse(trimmed);
-        if (chunk.message?.thinking) {
-          thinkingFull += chunk.message.thinking;
-          sendEvent(res, 'thinking', { delta: chunk.message.thinking });
-        }
-        if (chunk.message?.content) {
-          full += chunk.message.content;
-          sendEvent(res, 'token', { delta: chunk.message.content });
-        }
-        if (chunk.done) {
-          break;
+        sendEvent(res, 'tool', { name: toolName, args: toolArgs, status: 'done', result: resultText.slice(0, 500) });
+        messagesForModel.push({ role: 'tool', content: resultText, tool_name: toolName, tool_call_id: call.id });
+
+        if (meta?.documentId) {
+          generatedAttachments.push({ id: meta.documentId, filename: meta.filename, kind: meta.kind });
+          const eventName = meta.kind === 'image' ? 'image' : 'document';
+          sendEvent(res, eventName, { documentId: meta.documentId, filename: meta.filename, kind: meta.kind });
         }
       }
     }
   } catch (err) {
     if (err.name !== 'AbortError') {
       sendEvent(res, 'error', {
-        error: 'Could not reach Ollama. Make sure it is running (ollama serve) and the model is pulled.',
+        error:
+          !capabilities.external && /fetch failed|ECONNREFUSED/.test(err.message)
+            ? 'Could not reach Ollama. Make sure it is running (ollama serve) and the model is pulled.'
+            : capabilities.external && /fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/.test(err.message)
+              ? "Could not reach the external AI provider — check this computer's internet connection."
+              : `The model ran into a problem: ${err.message}`,
         details: err.message,
       });
+    }
+  }
+
+  // "Remember that I work in Credit" has one obvious meaning, but small models (and models with no
+  // tool support at all) don't reliably call save_memory for it — so an explicit request like that
+  // is saved here directly whenever the model didn't do it itself this turn.
+  const rememberRequest = REMEMBER_INTENT.exec(lastUserContent.trim());
+  if (rememberRequest && !toolContext.savedMemory && !supersedeMessageId) {
+    const { memory, error, duplicate } = addMemory(user.id, rememberRequest[1].replace(/[.!]+$/, ''));
+    if (memory && !duplicate) {
+      sendEvent(res, 'tool', { name: 'save_memory', args: { fact: memory.content }, status: 'running' });
+      sendEvent(res, 'tool', { name: 'save_memory', args: { fact: memory.content }, status: 'done', result: 'Saved to memory.' });
+    } else if (error) {
+      sendEvent(res, 'error', { error });
     }
   }
 
@@ -370,26 +397,22 @@ async function runAssistantTurn(
           'file and you did not call a tool to do so, call the matching create_*_document tool now with the content. ' +
           'If no real file was actually requested, do not call anything — this note does not apply.',
       });
-      const retryRes = await fetch(`${OLLAMA_URL}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages: messagesForModel, tools: TOOL_DEFS, stream: false }),
+      const retry = await llm.completeChat(model, {
+        messages: messagesForModel,
+        tools: TOOL_DEFS,
+        ...thinkOff,
         signal: controller.signal,
       });
-      if (retryRes.ok) {
-        const retryData = await retryRes.json();
-        const retryCalls = retryData.message?.tool_calls;
-        for (const call of retryCalls || []) {
-          const toolName = call.function?.name;
-          const toolArgs = call.function?.arguments || {};
-          sendEvent(res, 'tool', { name: toolName, args: toolArgs, status: 'running' });
-          const { text: resultText, meta } = await executeTool(toolName, toolArgs, toolContext);
-          sendEvent(res, 'tool', { name: toolName, args: toolArgs, status: 'done', result: resultText.slice(0, 500) });
-          if (meta?.documentId) {
-            generatedAttachments.push({ id: meta.documentId, filename: meta.filename, kind: meta.kind });
-            const eventName = meta.kind === 'image' ? 'image' : 'document';
-            sendEvent(res, eventName, { documentId: meta.documentId, filename: meta.filename, kind: meta.kind });
-          }
+      for (const call of retry.toolCalls) {
+        const toolName = call.function?.name;
+        const toolArgs = call.function?.arguments || {};
+        sendEvent(res, 'tool', { name: toolName, args: toolArgs, status: 'running' });
+        const { text: resultText, meta } = await executeTool(toolName, toolArgs, toolContext);
+        sendEvent(res, 'tool', { name: toolName, args: toolArgs, status: 'done', result: resultText.slice(0, 500) });
+        if (meta?.documentId) {
+          generatedAttachments.push({ id: meta.documentId, filename: meta.filename, kind: meta.kind });
+          const eventName = meta.kind === 'image' ? 'image' : 'document';
+          sendEvent(res, eventName, { documentId: meta.documentId, filename: meta.filename, kind: meta.kind });
         }
       }
     } catch {
@@ -430,19 +453,11 @@ async function runAssistantTurn(
             "exist. If you have any relevant general knowledge, give a corrected reply using it instead of " +
             'refusing. Reply with the corrected answer only, not a description of what changed.',
       });
-      const correctionRes = await fetch(`${OLLAMA_URL}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages: messagesForModel, stream: false }),
-        signal: controller.signal,
-      });
-      if (correctionRes.ok) {
-        const correctionData = await correctionRes.json();
-        const corrected = correctionData.message?.content?.trim();
-        if (corrected) {
-          full = corrected;
-          sendEvent(res, 'replace', { content: full });
-        }
+      const correction = await llm.completeChat(model, { messages: messagesForModel, ...thinkOff, signal: controller.signal });
+      const corrected = correction.content.trim();
+      if (corrected) {
+        full = corrected;
+        sendEvent(res, 'replace', { content: full });
       }
     } catch {
       // best-effort corrective pass — if it fails, the original refusal still stands
@@ -483,7 +498,7 @@ async function runAssistantTurn(
   sendEvent(res, 'done', { conversationId: convo.id, messageId: newMessageId, versionInfo });
 
   if (isNewConversation && full) {
-    const title = await generateTitle(model, lastUserContent, full);
+    const title = await generateTitle(model, lastUserContent, full, capabilities);
     if (title) {
       db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(title, convo.id);
       sendEvent(res, 'title', { conversationId: convo.id, title });
@@ -494,7 +509,7 @@ async function runAssistantTurn(
 }
 
 router.post('/stream', asyncHandler(async (req, res) => {
-  const { conversationId, model, content, documentIds, forceWebSearch } = req.body || {};
+  const { conversationId, model, content, documentIds, forceWebSearch, think } = req.body || {};
   const userId = req.session.userId;
 
   if (typeof content !== 'string' || !content.trim()) {
@@ -532,6 +547,14 @@ router.post('/stream', asyncHandler(async (req, res) => {
   const insertResult = db
     .prepare('INSERT INTO messages (conversation_id, role, content, attachments) VALUES (?, ?, ?, ?)')
     .run(convo.id, 'user', content, attachmentsMeta.length ? JSON.stringify(attachmentsMeta) : null);
+  logAudit(req, 'chat.message', {
+    conversationId: convo.id,
+    model,
+    external: llm.isExternal(model),
+    question: content,
+    attachments: attachmentsMeta.map((a) => a.filename),
+    webSearch: Boolean(forceWebSearch),
+  }, user);
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -548,6 +571,7 @@ router.post('/stream', asyncHandler(async (req, res) => {
     lastUserContent: content,
     userMessageId: insertResult.lastInsertRowid,
     forceWebSearch: Boolean(forceWebSearch),
+    think: Boolean(think),
     isNewConversation,
   });
 }));
@@ -557,7 +581,7 @@ router.post('/stream', asyncHandler(async (req, res) => {
 // switcher can bring it back) and after an edited user message has cascade-deleted everything
 // after it, leaving no reply at all yet.
 router.post('/regenerate', asyncHandler(async (req, res) => {
-  const { conversationId, model } = req.body || {};
+  const { conversationId, model, think } = req.body || {};
   const userId = req.session.userId;
 
   if (typeof model !== 'string' || !model.trim()) {
@@ -609,6 +633,7 @@ router.post('/regenerate', asyncHandler(async (req, res) => {
     documentIds,
     lastUserContent: userMessage.content,
     supersedeMessageId,
+    think: Boolean(think),
   });
 }));
 
@@ -635,33 +660,11 @@ router.post('/quick', asyncHandler(async (req, res) => {
   req.on('close', () => controller.abort());
 
   try {
-    const ollamaRes = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: true }),
+    await llm.streamChat(model, {
+      messages: [{ role: 'user', content: prompt }],
       signal: controller.signal,
+      onContent: (delta) => sendEvent(res, 'token', { delta }),
     });
-    if (!ollamaRes.ok || !ollamaRes.body) {
-      throw new Error(`Ollama responded with status ${ollamaRes.status}`);
-    }
-
-    const reader = ollamaRes.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const chunk = JSON.parse(trimmed);
-        if (chunk.message?.content) sendEvent(res, 'token', { delta: chunk.message.content });
-        if (chunk.done) break;
-      }
-    }
     sendEvent(res, 'done', {});
   } catch (err) {
     if (err.name !== 'AbortError') {

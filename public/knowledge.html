@@ -31,36 +31,55 @@
 
     <div class="kb-toolbar">
       <div>
-        <h2 id="kb-title">Knowledge base</h2>
-        <p class="admin-panel-hint" id="kb-subtitle">Documents your department has uploaded, used to answer questions in chat.</p>
+        <h2>Knowledge base</h2>
+        <p class="admin-panel-hint">
+          Everything here is searched automatically when you ask a question in chat — no need to attach it again.
+        </p>
       </div>
       <div class="kb-toolbar-actions">
-        <select id="kb-department-filter" class="hidden"></select>
-        <label class="kb-bankwide-toggle hidden" id="kb-bankwide-toggle">
-          <input type="checkbox" id="kb-bankwide-checkbox">
-          Publish bank-wide
-        </label>
-        <button class="btn-primary btn-compact" id="kb-upload-btn"><span data-icon="plus" data-icon-size="14"></span> Add files</button>
-        <input type="file" id="kb-file-input" class="hidden" multiple accept=".pdf,.docx,.xlsx,.xls,.xlsm,.csv,.txt,.md,.png,.jpg,.jpeg,.webp,.bmp,.gif">
+        <input type="search" id="kb-search" class="kb-search" placeholder="Filter files...">
       </div>
     </div>
+    <input type="file" id="kb-file-input" class="hidden" multiple accept=".pdf,.docx,.xlsx,.xls,.xlsm,.csv,.txt,.md,.png,.jpg,.jpeg,.webp,.bmp,.gif">
 
-    <div id="kb-no-department" class="kb-empty hidden">
-      <span data-icon="alertTriangle" data-icon-size="26"></span>
-      <span>Your account has no department assigned yet. Ask an admin to assign one from the admin portal before you can use the knowledge base.</span>
-    </div>
-
-    <div id="kb-bankwide-section" class="hidden">
-      <div class="kb-folder kb-folder-bankwide">
-        <div class="kb-folder-header">
-          <span data-icon="bank" data-icon-size="16"></span><span>Bank-wide</span>
-          <span class="count" id="kb-bankwide-count"></span>
+    <section class="kb-section kb-section-global">
+      <div class="kb-section-header">
+        <div>
+          <h3><span data-icon="bank" data-icon-size="17"></span> Bank-wide</h3>
+          <p class="kb-section-hint">Policies and documents for all staff. Managed by admins.</p>
         </div>
-        <div id="kb-bankwide-list"></div>
+        <button class="btn-primary btn-compact hidden" id="kb-upload-global-btn" type="button"><span data-icon="upload" data-icon-size="14"></span> Add bank-wide files</button>
       </div>
-    </div>
+      <div class="kb-list" id="kb-global-list"></div>
+    </section>
 
-    <div id="kb-folders"></div>
+    <section class="kb-section kb-section-department">
+      <div class="kb-section-header">
+        <div>
+          <h3><span data-icon="users" data-icon-size="17"></span> <span id="kb-department-title">Department</span></h3>
+          <p class="kb-section-hint" id="kb-department-hint">Shared with everyone in your department, and only them.</p>
+        </div>
+        <div class="kb-section-actions">
+          <select id="kb-department-filter" class="hidden"></select>
+          <button class="btn-primary btn-compact" id="kb-upload-department-btn" type="button"><span data-icon="upload" data-icon-size="14"></span> Add files</button>
+        </div>
+      </div>
+      <div id="kb-no-department" class="kb-empty hidden">
+        <span data-icon="alertTriangle" data-icon-size="26"></span>
+        <span>Your account has no department assigned yet. Ask an admin to assign one from the admin portal.</span>
+      </div>
+      <div class="kb-list" id="kb-department-list"></div>
+    </section>
+
+    <section class="kb-section kb-section-personal">
+      <div class="kb-section-header">
+        <div>
+          <h3><span data-icon="paperclip" data-icon-size="17"></span> My files</h3>
+          <p class="kb-section-hint">Files you attached in chats and documents AMERB AI made for you. Only you can see these — share one to make it available to your department.</p>
+        </div>
+      </div>
+      <div class="kb-list" id="kb-personal-list"></div>
+    </section>
   </div>
 </div>
 

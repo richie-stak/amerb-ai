@@ -5,5 +5,7 @@ data/*.db
 imagegen/venv/
 imagegen/__pycache__/
 certs/
+certs.backup*/
 *.log
 __pycache__/
+data/secret.key

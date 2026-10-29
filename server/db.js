@@ -99,6 +99,22 @@ function columnExists(table, column) {
   return rows.some((r) => r.name === column);
 }
 
+if (!columnExists('conversations', 'pinned')) {
+  db.exec(`ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`);
+}
+
+// Long-term memory, like ChatGPT's: short facts a user asked AMERB AI to remember ("I work in
+// Credit", "always answer in GHS"), injected into every future conversation of that same user.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id);
+`);
+
 if (!columnExists('users', 'role')) {
   db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`);
 }
@@ -210,6 +226,17 @@ if (!columnExists('users', 'locked_until')) {
 
 // Grandfather in the original local admin account created before roles existed.
 db.prepare(`UPDATE users SET role = 'admin' WHERE username = 'admin' AND role != 'admin'`).run();
+
+// Runs after the table rebuilds above, which recreate `documents` with a fixed column list.
+// Personal documents (chat attachments, AI-generated files, fetched web pages) belong to the one
+// user who created them — they're kept out of the shared department knowledge base, which is
+// only for files deliberately uploaded for the whole department. Fetched web pages were always
+// incidental to one person's chat, so existing ones are moved out of the shared base too.
+if (!columnExists('documents', 'is_personal')) {
+  db.exec(`ALTER TABLE documents ADD COLUMN is_personal INTEGER NOT NULL DEFAULT 0`);
+  // PowerPoint files can't be uploaded, only generated, so they're always someone's chat output.
+  db.exec(`UPDATE documents SET is_personal = 1 WHERE kind IN ('webpage', 'pptx') OR (kind = 'image' AND filename LIKE 'generated-%')`);
+}
 
 module.exports = db;
 module.exports.DB_PATH = DB_PATH;

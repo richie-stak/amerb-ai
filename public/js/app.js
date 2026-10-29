@@ -32,6 +32,7 @@
   const previewDownloadBtn = document.getElementById('preview-download-btn');
   const previewCloseBtn = document.getElementById('preview-close-btn');
   const webSearchToggleBtn = document.getElementById('web-search-toggle-btn');
+  const thinkToggleBtn = document.getElementById('think-toggle-btn');
   const settingsModalOverlay = document.getElementById('settings-modal-overlay');
   const settingsModalClose = document.getElementById('settings-modal-close');
   const settingsModalCancel = document.getElementById('settings-modal-cancel');
@@ -170,6 +171,7 @@
   }
 
   let webSearchToggled = false;
+  let thinkToggled = false;
   let webSearchAvailable = false;
 
   // ---------- Preview panel ----------
@@ -266,6 +268,20 @@
       : 'Web search is disabled — ask an admin to enable it in the admin portal';
   }
 
+  const composerHint = document.getElementById('composer-hint');
+  const LOCAL_HINT = composerHint.textContent;
+
+  // Only reasoning-capable models get a Think button — on any other model it would do nothing.
+  // Also keeps the line under the message box honest about where the conversation is going.
+  function updateThinkToggle() {
+    const model = modelsByName.get(modelSelect.value);
+    thinkToggleBtn.classList.toggle('hidden', !model?.thinking);
+    composerHint.classList.toggle('is-external', Boolean(model?.external));
+    composerHint.textContent = model?.external
+      ? `☁ ${model.provider} is an external service: your messages and any document excerpts used to answer them are sent to its servers${model.masked ? ' (account, card, phone and Ghana Card numbers are masked first)' : ''}.`
+      : LOCAL_HINT;
+  }
+
   async function loadModels() {
     try {
       const res = await fetch('/api/models');
@@ -286,9 +302,23 @@
         const opt = document.createElement('option');
         opt.value = m.name;
         const tags = [m.vision ? '👁' : '', m.tools ? '🔧' : '', m.thinking ? '🧠' : ''].filter(Boolean).join(' ');
-        opt.textContent = tags ? `${m.name} ${tags}` : m.name;
+        // External models (connected by an admin) show their provider and a cloud mark, so it's
+        // always obvious which choices send the conversation off this machine.
+        const label = m.external ? `☁ ${m.label}` : m.name;
+        opt.textContent = tags ? `${label} ${tags}` : label;
         modelSelect.appendChild(opt);
       }
+      // Remember each person's own pick across visits, like ChatGPT's model picker; fall back to
+      // the server's default (DEFAULT_MODEL in .env) for first-timers or if their pick was removed.
+      let saved = null;
+      try {
+        saved = localStorage.getItem('amerb-model');
+      } catch {
+        /* storage blocked — just use the default */
+      }
+      const preferred = [saved, data.defaultModel].find((n) => n && modelsByName.has(n));
+      if (preferred) modelSelect.value = preferred;
+      updateThinkToggle();
     } catch (err) {
       showBanner(err.message);
     }
@@ -314,28 +344,123 @@
       return;
     }
 
+    let currentGroup = null;
     for (const convo of filtered) {
+      const group = conversationGroup(convo);
+      if (group !== currentGroup) {
+        const header = document.createElement('div');
+        header.className = 'conversation-group-label';
+        header.textContent = group;
+        conversationList.appendChild(header);
+        currentGroup = group;
+      }
+
       const item = document.createElement('div');
       item.className = 'conversation-item' + (convo.id === currentConversationId ? ' active' : '');
 
       const title = document.createElement('span');
       title.className = 'title';
       title.textContent = convo.title;
+      title.title = 'Double-click to rename';
+      title.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        startRename(item, convo);
+      });
       item.appendChild(title);
 
-      const delBtn = document.createElement('button');
-      delBtn.className = 'delete-btn';
-      delBtn.innerHTML = icon('x', { size: 12 });
-      delBtn.title = 'Delete conversation';
-      delBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        deleteConversation(convo.id);
-      });
-      item.appendChild(delBtn);
+      const actions = document.createElement('div');
+      actions.className = 'conversation-actions';
+      actions.appendChild(
+        conversationActionBtn(convo.pinned ? 'Unpin' : 'Pin to top', 'pin', () => togglePin(convo), convo.pinned ? 'is-pinned' : '')
+      );
+      actions.appendChild(conversationActionBtn('Rename', 'pencil', () => startRename(item, convo)));
+      actions.appendChild(conversationActionBtn('Delete conversation', 'trash', () => deleteConversation(convo.id), 'danger'));
+      item.appendChild(actions);
 
       item.addEventListener('click', () => openConversation(convo.id));
       conversationList.appendChild(item);
     }
+  }
+
+  function conversationActionBtn(title, iconName, onClick, extraClass = '') {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `conversation-action-btn ${extraClass}`.trim();
+    btn.title = title;
+    btn.innerHTML = icon(iconName, { size: 13 });
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onClick();
+    });
+    return btn;
+  }
+
+  // Same buckets as ChatGPT's sidebar. SQLite's datetime('now') is UTC without a zone marker,
+  // so it has to be read as UTC explicitly or every chat shifts by the local offset.
+  function conversationGroup(convo) {
+    if (convo.pinned) return 'Pinned';
+    const updated = new Date(`${String(convo.updated_at).replace(' ', 'T')}Z`);
+    if (Number.isNaN(updated.getTime())) return 'Older';
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const days = (startOfToday - updated) / 86400000;
+    if (days <= 0) return 'Today';
+    if (days <= 1) return 'Yesterday';
+    if (days <= 7) return 'Previous 7 days';
+    if (days <= 30) return 'Previous 30 days';
+    return 'Older';
+  }
+
+  async function togglePin(convo) {
+    const res = await fetch(`/api/conversations/${convo.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned: !convo.pinned }),
+    });
+    if (!res.ok) {
+      showBanner('Could not update that chat.');
+      return;
+    }
+    await loadConversations();
+  }
+
+  function startRename(item, convo) {
+    const titleEl = item.querySelector('.title');
+    if (!titleEl || item.querySelector('.rename-input')) return;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'rename-input';
+    input.value = convo.title;
+    input.maxLength = 200;
+    titleEl.replaceWith(input);
+    input.focus();
+    input.select();
+
+    let finished = false;
+    const finish = async (save) => {
+      if (finished) return;
+      finished = true;
+      const newTitle = input.value.trim();
+      if (save && newTitle && newTitle !== convo.title) {
+        const res = await fetch(`/api/conversations/${convo.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: newTitle }),
+        });
+        if (res.ok) convo.title = newTitle;
+        else showBanner('Could not rename that chat.');
+      }
+      renderConversationList();
+    };
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') finish(true);
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        finish(false);
+      }
+    });
+    input.addEventListener('blur', () => finish(true));
   }
 
   async function deleteConversation(id) {
@@ -357,8 +482,11 @@
     }
     const data = await res.json();
     currentConversationId = id;
-    if (data.conversation.model) {
+    // Only switch to the chat's original model if it's still installed — otherwise the picker
+    // would go blank and the next message would fail with "A model must be selected".
+    if (data.conversation.model && modelsByName.has(data.conversation.model)) {
       modelSelect.value = data.conversation.model;
+      updateThinkToggle();
     }
     renderMessages(data.messages);
     renderConversationList();
@@ -387,7 +515,7 @@
         m.versionIndex, m.versionTotal
       );
     }
-    scrollToBottom();
+    scrollToBottom(true);
   }
 
   function appendMessageRow(role, content, attachments, messageId, citations, thinking, feedback, versionIndex, versionTotal) {
@@ -760,7 +888,7 @@
     // deleted, so retrying only needs to remove the old row from view — the server supersedes it.
     const model = modelSelect.value;
     row.remove();
-    await streamAssistant('/api/chat/regenerate', { conversationId: currentConversationId, model });
+    await streamAssistant('/api/chat/regenerate', { conversationId: currentConversationId, model, think: thinkToggled });
   }
 
   function startEditMessage(row, bubble) {
@@ -829,7 +957,7 @@
       }
 
       const model = modelSelect.value;
-      await streamAssistant('/api/chat/regenerate', { conversationId: currentConversationId, model });
+      await streamAssistant('/api/chat/regenerate', { conversationId: currentConversationId, model, think: thinkToggled });
     });
   }
 
@@ -839,7 +967,31 @@
     return div.innerHTML;
   }
 
-  function scrollToBottom() {
+  // Follow a streaming reply only while the reader is already at the bottom — scrolling up to
+  // re-read something mid-answer shouldn't be yanked back down on every new word. Opening a chat
+  // or sending a message passes `force` to jump down regardless.
+  let followLatest = true;
+  const jumpLatestBtn = document.createElement('button');
+  jumpLatestBtn.type = 'button';
+  jumpLatestBtn.className = 'jump-latest-btn hidden';
+  jumpLatestBtn.title = 'Jump to latest';
+  jumpLatestBtn.innerHTML = icon('arrowDown', { size: 16 });
+  jumpLatestBtn.addEventListener('click', () => scrollToBottom(true));
+  document.getElementById('chat-main').appendChild(jumpLatestBtn);
+
+  function distanceFromBottom() {
+    return chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight;
+  }
+
+  chatScroll.addEventListener('scroll', () => {
+    const distance = distanceFromBottom();
+    followLatest = distance < 80;
+    jumpLatestBtn.classList.toggle('hidden', distance < 300);
+  });
+
+  function scrollToBottom(force = false) {
+    if (force) followLatest = true;
+    if (!followLatest) return;
     chatScroll.scrollTop = chatScroll.scrollHeight;
   }
 
@@ -1044,7 +1196,8 @@
       for (const name of names) {
         const opt = document.createElement('option');
         opt.value = name;
-        opt.textContent = name;
+        const model = modelsByName.get(name);
+        opt.textContent = model?.external ? `☁ ${model.label}` : name;
         select.appendChild(opt);
       }
       if (names.includes(previous)) select.value = previous;
@@ -1268,6 +1421,90 @@
   function closePromptsModal() {
     promptsModalOverlay.classList.add('hidden');
   }
+
+  // ---------- Memory ----------
+
+  const memoryModalOverlay = document.getElementById('memory-modal-overlay');
+  const memoryList = document.getElementById('memory-list');
+  const memoryInput = document.getElementById('memory-input');
+  const memoryAddBtn = document.getElementById('memory-add-btn');
+
+  async function loadMemories() {
+    const res = await fetch('/api/memories');
+    const data = await res.json();
+    memoryList.innerHTML = '';
+    if (!data.memories || !data.memories.length) {
+      memoryList.innerHTML = '<div class="prompts-empty">Nothing remembered yet.</div>';
+      return;
+    }
+    for (const m of data.memories) {
+      const item = document.createElement('div');
+      item.className = 'saved-prompt-item memory-item';
+      const text = document.createElement('div');
+      text.className = 'saved-prompt-snippet';
+      text.textContent = m.content;
+      item.appendChild(text);
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'chip-remove';
+      deleteBtn.innerHTML = icon('x', { size: 12 });
+      deleteBtn.title = 'Forget this';
+      deleteBtn.addEventListener('click', async () => {
+        await fetch(`/api/memories/${m.id}`, { method: 'DELETE' });
+        loadMemories();
+      });
+      item.appendChild(deleteBtn);
+      memoryList.appendChild(item);
+    }
+  }
+
+  function openMemoryModal() {
+    workspaceMenu.classList.add('hidden');
+    memoryModalOverlay.classList.remove('hidden');
+    loadMemories();
+    memoryInput.focus();
+  }
+
+  function closeMemoryModal() {
+    memoryModalOverlay.classList.add('hidden');
+  }
+
+  async function addMemoryFromInput() {
+    const content = memoryInput.value.trim();
+    if (!content) return;
+    memoryAddBtn.disabled = true;
+    try {
+      const res = await fetch('/api/memories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showBanner(data.error || 'Could not save that memory');
+        return;
+      }
+      memoryInput.value = '';
+      await loadMemories();
+    } finally {
+      memoryAddBtn.disabled = false;
+    }
+  }
+
+  document.getElementById('workspace-memory-btn').addEventListener('click', openMemoryModal);
+  document.getElementById('memory-modal-close').addEventListener('click', closeMemoryModal);
+  document.getElementById('memory-done-btn').addEventListener('click', closeMemoryModal);
+  memoryModalOverlay.addEventListener('click', (e) => {
+    if (e.target === memoryModalOverlay) closeMemoryModal();
+  });
+  memoryAddBtn.addEventListener('click', addMemoryFromInput);
+  memoryInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') addMemoryFromInput();
+  });
+  document.getElementById('memory-clear-btn').addEventListener('click', async () => {
+    if (!confirm('Forget everything AMERB AI remembers about you? This cannot be undone.')) return;
+    await fetch('/api/memories', { method: 'DELETE' });
+    loadMemories();
+  });
 
   workspacePromptsBtn.addEventListener('click', openPromptsModal);
   promptsModalClose.addEventListener('click', closePromptsModal);
@@ -1543,6 +1780,9 @@
 
     const formData = new FormData();
     for (const f of files) formData.append('files', f);
+    // Files attached in a chat are the sender's own — they go to "My files", not the shared
+    // department knowledge base (they can share one from the Knowledge base page).
+    formData.append('scope', 'personal');
 
     try {
       const res = await fetch('/api/documents', { method: 'POST', body: formData });
@@ -1625,6 +1865,8 @@
         closeHelpModal();
       } else if (!searchModalOverlay.classList.contains('hidden')) {
         closeSearchModal();
+      } else if (!memoryModalOverlay.classList.contains('hidden')) {
+        closeMemoryModal();
       } else if (!promptsModalOverlay.classList.contains('hidden')) {
         closePromptsModal();
       } else if (!mentionMenu.classList.contains('hidden')) {
@@ -1659,6 +1901,22 @@
   webSearchToggleBtn.addEventListener('click', () => {
     webSearchToggled = !webSearchToggled;
     webSearchToggleBtn.classList.toggle('active', webSearchToggled);
+  });
+
+  // Unlike web search, Think stays on until switched off — it's a mode, like ChatGPT's reasoning
+  // toggle, not a one-off for a single message.
+  thinkToggleBtn.addEventListener('click', () => {
+    thinkToggled = !thinkToggled;
+    thinkToggleBtn.classList.toggle('active', thinkToggled);
+  });
+
+  modelSelect.addEventListener('change', () => {
+    try {
+      localStorage.setItem('amerb-model', modelSelect.value);
+    } catch {
+      /* storage blocked — the pick just won't be remembered */
+    }
+    updateThinkToggle();
   });
 
   async function sendMessage() {
@@ -1696,7 +1954,7 @@
 
     await streamAssistant(
       '/api/chat/stream',
-      { conversationId: currentConversationId, model, content, documentIds, forceWebSearch },
+      { conversationId: currentConversationId, model, content, documentIds, forceWebSearch, think: thinkToggled },
       userRow
     );
   }
@@ -1710,6 +1968,8 @@
     create_pdf_document: 'Writing the PDF',
     create_excel_document: 'Building the spreadsheet',
     create_powerpoint: 'Building the presentation',
+    save_memory: 'Saving to memory',
+    analyze_excel: 'Analysing the spreadsheet',
   };
 
   // Shared by a plain new message, a retry, and a post-edit resubmit — streams the assistant's
@@ -1727,7 +1987,7 @@
     const { contentEl: assistantWrapEl, textEl: assistantContentEl, toolStatusEl, thinkingEl, row: assistantRow, versionSwitcherEl } =
       appendMessageRow('assistant', '');
     assistantContentEl.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
-    scrollToBottom();
+    scrollToBottom(true);
 
     let accumulated = '';
     let thinkingAccumulated = '';

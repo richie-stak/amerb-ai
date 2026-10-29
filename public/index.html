@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AMERB AI</title>
 <link rel="icon" href="/img/favicon.png">
+<link rel="stylesheet" href="/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/vendor/hljs/styles/github-dark.min.css">
 <link rel="stylesheet" href="/css/style.css">
 <script>
 (function () {
@@ -39,6 +41,7 @@
         <a id="workspace-admin-link" href="/admin.html" class="hidden"><span data-icon="shield" data-icon-size="15"></span> Admin portal</a>
         <button type="button" id="workspace-instructions-btn"><span data-icon="sliders" data-icon-size="15"></span> Custom instructions</button>
         <button type="button" id="workspace-prompts-btn"><span data-icon="lightbulb" data-icon-size="15"></span> Saved prompts</button>
+        <button type="button" id="workspace-memory-btn"><span data-icon="bookmark" data-icon-size="15"></span> Memory</button>
         <button type="button" id="workspace-compare-btn"><span data-icon="columns" data-icon-size="15"></span> Compare models</button>
         <button type="button" id="workspace-password-btn"><span data-icon="key" data-icon-size="15"></span> Change password</button>
         <button type="button" id="workspace-help-btn"><span data-icon="helpCircle" data-icon-size="15"></span> Getting started</button>
@@ -81,7 +84,7 @@
         <div class="empty-state" id="empty-state">
           <img class="empty-state-mark" src="/img/amenfiman-mark.png" alt="">
           <h2>What can I help you with?</h2>
-          <p>Pick a model above and start typing below. Attach files with the paperclip button, or ask about anything already in your department's knowledge base.</p>
+          <p>Pick a model above and start typing below. Attach files with the paperclip button, or ask about anything in the bank-wide or your department's knowledge base.</p>
           <div class="starter-prompts" id="starter-prompts"></div>
         </div>
       </div>
@@ -105,11 +108,12 @@
             <select id="model-select"></select>
           </div>
           <button class="mic-btn" id="mic-btn" type="button" title="Voice input (transcribed locally, never leaves this machine)"><span data-icon="mic" data-icon-size="16"></span></button>
+          <button class="web-search-toggle-btn hidden" id="think-toggle-btn" type="button" title="Think before answering — slower, better for hard problems"><span data-icon="brain" data-icon-size="15"></span></button>
           <button class="web-search-toggle-btn" id="web-search-toggle-btn" type="button" title="Search the web for this message"><span data-icon="globe" data-icon-size="15"></span></button>
           <button class="send-btn" id="send-btn" disabled><span data-icon="send" data-icon-size="17"></span></button>
         </div>
       </div>
-      <div class="composer-hint">AMERB AI runs entirely locally via Ollama LLM.</div>
+      <div class="composer-hint" id="composer-hint">AMERB AI runs entirely locally via Ollama LLM.</div>
     </div>
   </main>
 
@@ -214,7 +218,7 @@
       <div class="modal-body help-modal-body">
         <div class="help-section">
           <h4><span data-icon="paperclip" data-icon-size="15"></span> Attach or reference documents</h4>
-          <p>Use the paperclip button to upload a file, or type <code>@</code> in the message box to reference any document already in your department's knowledge base — no re-upload needed.</p>
+          <p>Use the paperclip button to upload a file, or type <code>@</code> in the message box to reference any document you can see — bank-wide, your department's, or your own files — no re-upload needed.</p>
         </div>
         <div class="help-section">
           <h4><span data-icon="mic" data-icon-size="15"></span> Voice input</h4>
@@ -278,10 +282,36 @@
       </div>
     </div>
   </div>
+
+  <div class="modal-overlay hidden" id="memory-modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Memory</h3>
+        <button class="modal-close-btn" id="memory-modal-close" type="button"><span data-icon="x" data-icon-size="18"></span></button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-hint">
+          AMERB AI remembers these facts in every chat. Say <code>remember that…</code> in any conversation to
+          add one, or add it here. Only you can see your memories.
+        </p>
+        <div class="prompt-add-form">
+          <input type="text" id="memory-input" maxlength="300" placeholder="e.g. I work in the Credit department">
+          <button class="btn-primary btn-compact" id="memory-add-btn" type="button">Remember</button>
+        </div>
+        <div class="saved-prompts-list" id="memory-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="modal-btn-secondary" id="memory-clear-btn" type="button">Clear all</button>
+        <button class="modal-btn-primary" id="memory-done-btn" type="button">Done</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="/js/icons.js"></script>
 <script src="/js/theme.js"></script>
+<script src="/vendor/hljs/highlight.min.js"></script>
+<script src="/vendor/katex/katex.min.js"></script>
 <script src="/js/markdown.js"></script>
 <script src="/js/app.js"></script>
 </body>

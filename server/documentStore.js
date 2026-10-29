@@ -8,15 +8,16 @@ const MIME_TYPES = {
   pdf: 'application/pdf',
 };
 
-// Saves a generated office/PDF file as a document row so it's downloadable, previewable, and
-// shows up in the department knowledge base like any other file. `searchableText` (the source
+// Saves a generated office/PDF file as a document row so it's downloadable and previewable. It's
+// a personal file — it shows under "My files" for the person who asked for it, not in the shared
+// department knowledge base (they can share it from there). `searchableText` (the source
 // markdown, CSV-like rows, or slide outline) is chunked and indexed the same way uploaded
-// documents are, so later chat questions can retrieve it without re-attaching the file.
+// documents are, so their later chat questions can retrieve it without re-attaching the file.
 function saveGeneratedFile(buffer, filename, kind, user, searchableText = '') {
   const department = user.department || 'General';
   const result = db
     .prepare(
-      'INSERT INTO documents (user_id, department, filename, mime_type, kind, file_data, char_count) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO documents (user_id, department, is_personal, filename, mime_type, kind, file_data, char_count) VALUES (?, ?, 1, ?, ?, ?, ?, ?)'
     )
     .run(user.id, department, filename, MIME_TYPES[kind], kind, buffer.toString('base64'), searchableText.length);
 
