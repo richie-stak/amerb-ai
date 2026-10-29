@@ -8,6 +8,12 @@ const openai = require('./openai');
 const anthropic = require('./anthropic');
 const { PROVIDER_TYPES, listProviders, getProvider, apiKeyOf } = require('./providers');
 const { NUM_CTX } = require('../ollama');
+const { createRedactor } = require('./redact');
+const { getSetting } = require('../settings');
+
+function isRedactionEnabled() {
+  return getSetting('external_redaction', 'true') !== 'false';
+}
 
 const EXTERNAL_PREFIX = 'ext/';
 
@@ -44,6 +50,7 @@ function listExternalModels() {
         label: `${provider.name} · ${modelId}`,
         provider: provider.name,
         external: true,
+        masked: isRedactionEnabled(),
         vision: type.vision,
         tools: true,
         thinking: false,
@@ -96,21 +103,40 @@ async function streamChat(name, { messages, tools, think, maxTokens, signal, onT
   if (target.kind === 'ollama') {
     result = await ollama.streamChat({ model: target.model, messages, tools, think, maxTokens, signal, onThinking, onContent });
   } else {
+    // Customer identifiers are masked on the way out and restored on the way back, so the
+    // provider never sees them but staff (and locally run tools) do. On unless an admin turns it off.
+    const redactor = isRedactionEnabled() ? createRedactor() : null;
+    const contentOut = redactor ? redactor.streamRestorer(onContent) : { push: onContent, flush: () => {} };
+    const thinkingOut = redactor ? redactor.streamRestorer(onThinking) : { push: onThinking, flush: () => {} };
     const common = {
       baseUrl: target.provider.baseUrl,
       apiKey: apiKeyOf(target.provider),
       model: target.model,
-      messages,
+      messages: redactor ? redactor.maskMessages(messages) : messages,
       tools,
       maxTokens,
       signal,
-      onThinking,
-      onContent,
+      onThinking: (delta) => thinkingOut.push(delta),
+      onContent: (delta) => contentOut.push(delta),
     };
     result =
       target.type.api === 'anthropic'
         ? await anthropic.streamChat(common)
         : await openai.streamChat({ ...common, isOpenAi: target.provider.type === 'openai' });
+    contentOut.flush();
+    thinkingOut.flush();
+    if (redactor) {
+      result = {
+        ...result,
+        content: redactor.restore(result.content),
+        thinking: redactor.restore(result.thinking),
+        toolCalls: result.toolCalls.map((call) => ({
+          ...call,
+          function: { ...call.function, arguments: redactor.restoreDeep(call.function.arguments) },
+        })),
+        maskedCount: redactor.count,
+      };
+    }
   }
   return { ...result, toolCalls: withCallIds(result.toolCalls) };
 }

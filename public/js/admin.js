@@ -938,6 +938,7 @@
     if (!res.ok) return showError(data.error || 'Could not load settings');
     document.getElementById('web-search-toggle').checked = data.webSearchEnabled;
     document.getElementById('search-restricted-toggle').checked = data.searchRestricted;
+    document.getElementById('external-redaction-toggle').checked = data.externalRedaction;
     if (data.houseModel) {
       document.getElementById('house-model-name').value = data.houseModel.name;
       document.getElementById('house-model-prompt').value = data.houseModel.systemPrompt;
@@ -964,6 +965,7 @@
 
   document.getElementById('web-search-toggle').addEventListener('change', (e) => updateSetting('webSearchEnabled', e.target));
   document.getElementById('search-restricted-toggle').addEventListener('change', (e) => updateSetting('searchRestricted', e.target));
+  document.getElementById('external-redaction-toggle').addEventListener('change', (e) => updateSetting('externalRedaction', e.target));
 
   // ---------- Analytics ----------
 

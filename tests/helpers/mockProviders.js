@@ -20,6 +20,11 @@ function openAiReply(body) {
   const chunk = (delta) => `data: ${JSON.stringify({ choices: [{ index: 0, delta }] })}\n\n`;
 
   if (toolResult) return [chunk({ content: 'The answer is ' }), chunk({ content: toolResult.content.trim() }), 'data: [DONE]\n\n'];
+  // "echo: ..." repeats the message back in small pieces — shows what the provider actually
+  // received, and checks that placeholders split across fragments are still restored.
+  if (/^echo:/i.test(lastText)) {
+    return [...lastText.match(/.{1,7}/gs).map((piece) => chunk({ content: piece })), 'data: [DONE]\n\n'];
+  }
   if (/calculate/i.test(lastText) && body.tools) {
     return [
       chunk({ tool_calls: [{ index: 0, id: 'call_abc', type: 'function', function: { name: 'run_code', arguments: '' } }] }),

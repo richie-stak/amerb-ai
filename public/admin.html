@@ -138,6 +138,17 @@
           Only enable the models your bank's data policy allows.
         </p>
 
+        <label class="settings-toggle-row">
+          <input type="checkbox" id="external-redaction-toggle">
+          <span>Mask customer details before sending to external AI (recommended)</span>
+        </label>
+        <p class="admin-panel-hint hint-spaced">
+          Ghana Card numbers, phone numbers, email addresses, TINs and account/card numbers are replaced with
+          placeholders such as <code>[ACCOUNT_NUMBER_1]</code> in everything sent to an external provider — the
+          question, the chat history and any document excerpts — and swapped back for the real values in the reply,
+          so the provider never sees them but staff do. Names and free-text descriptions are not masked.
+        </p>
+
         <h3 class="admin-subheading">Connect a provider</h3>
         <div class="provider-form">
           <div class="field">

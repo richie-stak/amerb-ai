@@ -147,6 +147,28 @@ test('Claude models work through the Anthropic adapter, including tool use', asy
   assert.equal(results[0].tool_use_id, 'toolu_1');
 });
 
+test('customer identifiers are masked before reaching the provider, and restored in the reply', async () => {
+  mock.requests.openai.length = 0;
+  const message = 'echo: Ama, account 1020304050607, phone 0241234567, card GHA-123456789-0, loan GHS 50,000';
+  const events = await chat(staff, `ext/${ids.openai}/mock-gpt`, message);
+
+  const sent = JSON.stringify(mock.requests.openai[0]);
+  for (const secret of ['1020304050607', '0241234567', 'GHA-123456789-0']) {
+    assert.ok(!sent.includes(secret), `${secret} must not reach the provider`);
+  }
+  assert.ok(sent.includes('[ACCOUNT_NUMBER_1]') && sent.includes('[PHONE_1]') && sent.includes('[GHANA_CARD_1]'));
+  assert.ok(sent.includes('GHS 50,000'), 'ordinary amounts are left alone');
+  assert.equal(replyText(events), message, 'staff see the real values in the reply');
+});
+
+test('masking can be switched off by an admin', async () => {
+  assert.equal((await admin.post('/api/admin/settings', { externalRedaction: false })).status, 200);
+  mock.requests.openai.length = 0;
+  await chat(staff, `ext/${ids.openai}/mock-gpt`, 'echo: account 1020304050607');
+  assert.ok(JSON.stringify(mock.requests.openai[0]).includes('1020304050607'));
+  await admin.post('/api/admin/settings', { externalRedaction: true });
+});
+
 test('disabling a provider removes its models and refuses further chats with them', async () => {
   await admin.patch(`/api/admin/providers/${ids.openai}`, { enabled: false });
   const { models } = await (await staff.get('/api/models')).json();

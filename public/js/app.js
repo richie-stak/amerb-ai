@@ -278,7 +278,7 @@
     thinkToggleBtn.classList.toggle('hidden', !model?.thinking);
     composerHint.classList.toggle('is-external', Boolean(model?.external));
     composerHint.textContent = model?.external
-      ? `☁ ${model.provider} is an external service: your messages and any document excerpts used to answer them are sent to its servers.`
+      ? `☁ ${model.provider} is an external service: your messages and any document excerpts used to answer them are sent to its servers${model.masked ? ' (account, card, phone and Ghana Card numbers are masked first)' : ''}.`
       : LOCAL_HINT;
   }
 

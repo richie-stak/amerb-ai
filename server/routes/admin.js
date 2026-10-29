@@ -333,11 +333,18 @@ router.get('/settings', (req, res) => {
     searchRestricted: getSetting('search_restricted', 'false') === 'true',
     houseModel: getHouseModel(),
     retentionDays: Number(getSetting('retention_days', '0')) || 0,
+    externalRedaction: getSetting('external_redaction', 'true') !== 'false',
   });
 });
 
 router.post('/settings', (req, res) => {
-  const { webSearchEnabled, searchRestricted, retentionDays } = req.body || {};
+  const { webSearchEnabled, searchRestricted, retentionDays, externalRedaction } = req.body || {};
+  if (externalRedaction !== undefined) {
+    if (typeof externalRedaction !== 'boolean') {
+      return res.status(400).json({ error: 'externalRedaction must be true or false' });
+    }
+    setSetting('external_redaction', externalRedaction ? 'true' : 'false');
+  }
   if (webSearchEnabled !== undefined) {
     if (typeof webSearchEnabled !== 'boolean') {
       return res.status(400).json({ error: 'webSearchEnabled must be true or false' });
