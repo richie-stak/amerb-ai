@@ -6,6 +6,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { extractText, chunkText, isImageFile, imageMimeType } = require('../documentExtract');
 const { BANKWIDE_DEPARTMENT, DEPARTMENTS } = require('../departments');
 const { SCOPES, scopeOf, canAccessDoc, canDeleteDoc, searchableWhere } = require('../documentAccess');
+const { indexPendingChunks } = require('../embeddings');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -180,6 +181,8 @@ router.post('/', upload.array('files', 5), asyncHandler(async (req, res) => {
     }
   }
 
+  // Make the new files searchable by meaning straight away rather than at the next background pass.
+  indexPendingChunks();
   res.json({ results });
 }));
 

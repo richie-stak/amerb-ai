@@ -12,6 +12,8 @@ const session = require('express-session');
 const { ensureCert, localIPv4Addresses } = require('./certs');
 const { runRetentionSweep } = require('./retention');
 const { warmUpDefaultModel } = require('./ollama');
+const { SqliteSessionStore } = require('./sessionStore');
+const { startBackgroundIndexing } = require('./embeddings');
 
 const authRoutes = require('./routes/auth');
 const conversationRoutes = require('./routes/conversations');
@@ -45,6 +47,8 @@ app.use(express.json({ limit: '1mb' }));
 app.use(
   session({
     name: 'amerb.sid',
+    // Stored in the database, so a server restart doesn't sign everyone out.
+    store: new SqliteSessionStore(),
     secret: process.env.SESSION_SECRET || 'dev-only-secret-change-me',
     resave: false,
     saveUninitialized: false,
@@ -126,7 +130,11 @@ ensureCert()
       }
       runRetentionSweep();
       setInterval(runRetentionSweep, RETENTION_SWEEP_INTERVAL_MS).unref();
-      if (!process.env.AMERB_SKIP_WARMUP) warmUpDefaultModel();
+      if (!process.env.AMERB_SKIP_WARMUP) {
+        warmUpDefaultModel();
+        // Builds meaning-based search for any documents not indexed yet, then keeps up with new ones.
+        startBackgroundIndexing();
+      }
     });
   })
   .catch((err) => {

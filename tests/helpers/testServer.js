@@ -39,11 +39,9 @@ async function waitForReady(baseUrl, child) {
   throw new Error(`Server did not become ready in time: ${lastErr}`);
 }
 
-async function startTestServer() {
-  const dbPath = path.join(os.tmpdir(), `amerb-test-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.sqlite`);
-  const port = randomPort();
+// Starts the app as a child process on a given database file and port, and waits until it answers.
+async function spawnServer(dbPath, port) {
   const stderrChunks = [];
-
   const child = spawn('node', [path.join(__dirname, '..', '..', 'server', 'index.js')], {
     env: {
       ...process.env,
@@ -58,26 +56,44 @@ async function startTestServer() {
   });
   child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
 
-  const baseUrl = `https://localhost:${port}`;
   try {
-    await waitForReady(baseUrl, child);
+    await waitForReady(`https://localhost:${port}`, child);
   } catch (err) {
     child.kill();
     const stderr = Buffer.concat(stderrChunks).toString('utf8');
-    throw new Error(`${err.message}\n--- server stderr ---\n${stderr}`);
+    throw new Error(`${err.message}
+--- server stderr ---
+${stderr}`);
   }
+  return child;
+}
+
+async function stopChild(child) {
+  if (child.exitCode !== null) return;
+  child.kill();
+  await new Promise((resolve) => child.once('exit', resolve));
+}
+
+async function startTestServer() {
+  const dbPath = path.join(os.tmpdir(), `amerb-test-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.sqlite`);
+  const port = randomPort();
+  let child = await spawnServer(dbPath, port);
 
   return {
-    baseUrl,
+    baseUrl: `https://localhost:${port}`,
     dbPath,
     // Direct DB access for fixture setup the API can't do (e.g. backdating timestamps) — a
     // second connection to the same file is safe since better-sqlite/node:sqlite use WAL mode.
     openDb() {
       return new DatabaseSync(dbPath);
     },
+    // Stops and starts the app again on the same database and port — like a real restart.
+    async restart() {
+      await stopChild(child);
+      child = await spawnServer(dbPath, port);
+    },
     async stop() {
-      child.kill();
-      await new Promise((resolve) => child.once('exit', resolve));
+      await stopChild(child);
       for (const suffix of ['', '-wal', '-shm', '.key']) {
         fs.rmSync(`${dbPath}${suffix}`, { force: true });
       }
@@ -98,6 +114,11 @@ function makeClient(baseUrl) {
     return res;
   }
   return {
+    // The session cookie, to carry a login over to another client (e.g. across a restart).
+    getCookie: () => cookie,
+    setCookie: (value) => {
+      cookie = value;
+    },
     get: (pathname) => request(pathname),
     post: (pathname, body) =>
       request(pathname, {

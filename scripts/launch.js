@@ -126,21 +126,26 @@ async function ensureOllama() {
     return;
   }
 
-  const model = process.env.DEFAULT_MODEL;
-  if (!model) return;
+  // The chat model, plus the small embedding model that makes document search work by meaning.
+  const required = [
+    { name: process.env.DEFAULT_MODEL, role: 'default chat model', size: 'a few GB', fallback: "pick another model in the chat until it's pulled" },
+    { name: process.env.EMBED_MODEL || 'nomic-embed-text', role: 'document search model', size: 'about 270 MB', fallback: 'document search uses keywords only until it is pulled' },
+  ].filter((m) => m.name);
   const withTag = (n) => (n.includes(':') ? n : `${n}:latest`);
-  const installed = (tags.models || []).some((m) => withTag(m.name) === withTag(model));
-  if (installed) {
-    log(`Ollama is running and the default model "${model}" is installed.`);
-    return;
-  }
-  if (!commandExists('ollama')) {
-    log(`[!] The default model "${model}" isn't installed. Pull it on the Ollama machine with: ollama pull ${model}`);
-    return;
-  }
-  log(`Downloading the default model "${model}" (one-time, a few GB)...`);
-  if (!run('ollama', ['pull', model])) {
-    log(`[!] Could not download "${model}". AMERB AI will start, but pick another model in the chat until it's pulled.`);
+  for (const model of required) {
+    const installed = (tags.models || []).some((m) => withTag(m.name) === withTag(model.name));
+    if (installed) {
+      log(`Ollama has the ${model.role} "${model.name}".`);
+      continue;
+    }
+    if (!commandExists('ollama')) {
+      log(`[!] The ${model.role} "${model.name}" isn't installed. Pull it on the Ollama machine with: ollama pull ${model.name}`);
+      continue;
+    }
+    log(`Downloading the ${model.role} "${model.name}" (one-time, ${model.size})...`);
+    if (!run('ollama', ['pull', model.name])) {
+      log(`[!] Could not download "${model.name}". AMERB AI will start, but ${model.fallback}.`);
+    }
   }
 }
 

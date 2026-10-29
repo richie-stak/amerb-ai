@@ -2,7 +2,7 @@ const express = require('express');
 const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
-const { getExplicitContext, getAutoContext } = require('../retrieval');
+const { getExplicitContext, getHybridContext } = require('../retrieval');
 const { TOOL_DEFS, executeTool, webSearch } = require('../tools');
 const { isWebSearchEnabled, getHouseModel } = require('../settings');
 const { addMemory, memoryPrompt } = require('../memory');
@@ -138,7 +138,7 @@ async function runAssistantTurn(
 
   // Only auto-retrieved sources become "citations" — explicitly attached documents are already
   // visible as attachment chips on the user's own message, so citing them again would be noise.
-  const { text: autoContext, sources: citations } = getAutoContext(
+  const { text: autoContext, sources: citations } = await getHybridContext(
     user,
     lastUserContent,
     attachedDocs.map((d) => d.id)

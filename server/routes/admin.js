@@ -9,6 +9,7 @@ const db = require('../db');
 const { requireAdmin } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const { DEPARTMENTS } = require('../departments');
+const { destroyUserSessions } = require('../sessionStore');
 
 // Excludes visually-ambiguous characters (0/O, 1/l/I) so a temporary password read aloud or typed
 // from a screen doesn't trip people up.
@@ -87,6 +88,7 @@ router.delete('/users/:id', (req, res) => {
   }
 
   db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
+  destroyUserSessions(targetId);
   res.json({ ok: true });
 });
 
@@ -105,6 +107,9 @@ router.post('/users/:id/reset-password', asyncHandler(async (req, res) => {
     hash,
     targetId
   );
+  // Sessions now survive restarts, so an old login must not outlive a reset — e.g. one left open
+  // on a shared PC is exactly why an admin resets a password.
+  destroyUserSessions(targetId);
 
   res.json({ ok: true, tempPassword });
 }));
