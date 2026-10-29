@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AMERB AI</title>
+<link rel="icon" href="/img/favicon.png">
+<link rel="stylesheet" href="/css/style.css">
+<script>
+(function () {
+  var t = localStorage.getItem('amerb-theme');
+  if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+</head>
+<body>
+<div class="app-shell hidden" id="app-shell">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <img class="mark" src="/img/amenfiman-mark.png" alt="Amenfiman Community Bank">
+      <span>AMERB AI</span>
+    </div>
+
+    <button class="new-chat-btn" id="new-chat-btn"><span data-icon="plus" data-icon-size="15"></span> New chat</button>
+
+    <div class="conversation-search-row">
+      <input type="text" id="conversation-search" class="conversation-search" placeholder="Search chats...">
+      <button class="search-all-btn" id="search-all-btn" type="button" title="Search inside all your chats"><span data-icon="search" data-icon-size="14"></span></button>
+    </div>
+    <div class="conversation-list" id="conversation-list"></div>
+
+    <div class="workspace-menu-wrap">
+      <button class="admin-link workspace-toggle-btn" id="workspace-toggle-btn" type="button">
+        <span><span data-icon="settings" data-icon-size="15"></span> Workspace</span>
+        <span class="workspace-toggle-caret" data-icon="chevronDown" data-icon-size="12"></span>
+      </button>
+      <div class="workspace-menu hidden" id="workspace-menu">
+        <a id="workspace-kb-link" href="/knowledge.html"><span data-icon="folder" data-icon-size="15"></span> Knowledge base</a>
+        <a id="workspace-admin-link" href="/admin.html" class="hidden"><span data-icon="shield" data-icon-size="15"></span> Admin portal</a>
+        <button type="button" id="workspace-instructions-btn"><span data-icon="sliders" data-icon-size="15"></span> Custom instructions</button>
+        <button type="button" id="workspace-prompts-btn"><span data-icon="lightbulb" data-icon-size="15"></span> Saved prompts</button>
+        <button type="button" id="workspace-compare-btn"><span data-icon="columns" data-icon-size="15"></span> Compare models</button>
+        <button type="button" id="workspace-password-btn"><span data-icon="key" data-icon-size="15"></span> Change password</button>
+        <button type="button" id="workspace-help-btn"><span data-icon="helpCircle" data-icon-size="15"></span> Getting started</button>
+        <button type="button" id="workspace-theme-btn"></button>
+      </div>
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="user-menu">
+        <div class="user-avatar" id="user-avatar">?</div>
+        <div class="user-info">
+          <div class="name" id="user-name">...</div>
+          <div class="dept" id="user-dept"></div>
+        </div>
+        <button class="logout-btn" id="logout-btn">Log out</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="chat-main" id="chat-main">
+    <div class="drop-overlay hidden" id="drop-overlay">
+      <div class="drop-overlay-inner">
+        <span data-icon="paperclip" data-icon-size="28"></span>
+        <span>Drop files to attach</span>
+      </div>
+    </div>
+    <div class="chat-toolbar">
+      <div class="export-wrap">
+        <button class="export-btn" id="export-btn" type="button" title="Export this conversation">
+          <span data-icon="download" data-icon-size="15"></span> Export
+        </button>
+        <div class="export-menu hidden" id="export-menu">
+          <button type="button" id="export-docx-btn"><span data-icon="fileText" data-icon-size="15"></span> Word (.docx)</button>
+          <button type="button" id="export-pdf-btn"><span data-icon="fileText" data-icon-size="15"></span> PDF</button>
+        </div>
+      </div>
+    </div>
+    <div class="chat-scroll" id="chat-scroll">
+      <div class="chat-inner" id="chat-inner">
+        <div class="empty-state" id="empty-state">
+          <img class="empty-state-mark" src="/img/amenfiman-mark.png" alt="">
+          <h2>What can I help you with?</h2>
+          <p>Pick a model above and start typing below. Attach files with the paperclip button, or ask about anything already in your department's knowledge base.</p>
+          <div class="starter-prompts" id="starter-prompts"></div>
+        </div>
+      </div>
+      <div class="banner hidden" id="error-banner"></div>
+    </div>
+
+    <div class="composer">
+      <div class="attachment-chips hidden" id="attachment-chips"></div>
+      <div class="composer-inner">
+        <div class="mention-menu hidden" id="mention-menu"></div>
+        <textarea id="composer-input" placeholder="Message AMERB AI... (type @ to reference a document)" rows="1"></textarea>
+        <div class="composer-toolbar">
+          <div class="attach-wrap">
+            <button class="attach-btn" id="attach-btn" type="button" title="Add files"><span data-icon="paperclip" data-icon-size="16"></span></button>
+            <div class="attach-menu hidden" id="attach-menu">
+              <button type="button" id="attach-files-btn"><span data-icon="paperclip" data-icon-size="15"></span> Add files or photos</button>
+            </div>
+          </div>
+          <input type="file" id="file-input" class="hidden" multiple accept=".pdf,.docx,.xlsx,.xls,.xlsm,.csv,.txt,.md,.png,.jpg,.jpeg,.webp,.bmp,.gif">
+          <div class="model-select-wrap">
+            <select id="model-select"></select>
+          </div>
+          <button class="mic-btn" id="mic-btn" type="button" title="Voice input (transcribed locally, never leaves this machine)"><span data-icon="mic" data-icon-size="16"></span></button>
+          <button class="web-search-toggle-btn" id="web-search-toggle-btn" type="button" title="Search the web for this message"><span data-icon="globe" data-icon-size="15"></span></button>
+          <button class="send-btn" id="send-btn" disabled><span data-icon="send" data-icon-size="17"></span></button>
+        </div>
+      </div>
+      <div class="composer-hint">AMERB AI runs entirely locally via Ollama LLM.</div>
+    </div>
+  </main>
+
+  <aside class="preview-panel hidden" id="preview-panel">
+    <div class="preview-header">
+      <div class="preview-header-info">
+        <span class="preview-icon" id="preview-icon" data-icon="fileText" data-icon-size="17"></span>
+        <span class="preview-filename" id="preview-filename">document.docx</span>
+      </div>
+      <div class="preview-header-actions">
+        <a class="preview-download-btn" id="preview-download-btn" href="#" title="Download"><span data-icon="download" data-icon-size="16"></span></a>
+        <button class="preview-close-btn" id="preview-close-btn" title="Close"><span data-icon="x" data-icon-size="16"></span></button>
+      </div>
+    </div>
+    <div class="preview-body" id="preview-body">
+      <div class="preview-loading">Loading preview...</div>
+    </div>
+  </aside>
+
+  <div class="modal-overlay hidden" id="settings-modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Custom instructions</h3>
+        <button class="modal-close-btn" id="settings-modal-close" type="button"><span data-icon="x" data-icon-size="18"></span></button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-hint">Tell AMERB AI how you'd like it to respond. This applies to every new message you send, in every conversation.</p>
+        <textarea id="custom-instructions-input" rows="7" placeholder="e.g. I work in the credit department — keep answers concise and reference bank policy where relevant."></textarea>
+      </div>
+      <div class="modal-footer">
+        <button class="modal-btn-secondary" id="settings-modal-cancel" type="button">Cancel</button>
+        <button class="modal-btn-primary" id="settings-modal-save" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="password-modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Change password</h3>
+        <button class="modal-close-btn" id="password-modal-close" type="button"><span data-icon="x" data-icon-size="18"></span></button>
+      </div>
+      <div class="modal-body">
+        <div class="banner hidden" id="password-modal-error"></div>
+        <div class="field">
+          <label for="current-password-input">Current password</label>
+          <input type="password" id="current-password-input" autocomplete="current-password">
+        </div>
+        <div class="field">
+          <label for="new-password-input">New password</label>
+          <input type="password" id="new-password-input" autocomplete="new-password" minlength="8">
+          <div class="field-hint">At least 8 characters.</div>
+        </div>
+        <div class="field">
+          <label for="confirm-password-input">Confirm new password</label>
+          <input type="password" id="confirm-password-input" autocomplete="new-password" minlength="8">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="modal-btn-secondary" id="password-modal-cancel" type="button">Cancel</button>
+        <button class="modal-btn-primary" id="password-modal-save" type="button">Change password</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="compare-modal-overlay">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h3>Compare models</h3>
+        <button class="modal-close-btn" id="compare-modal-close" type="button"><span data-icon="x" data-icon-size="18"></span></button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-hint">
+          Run the same prompt against two models at once, with no document context or tools involved — a
+          direct look at how each model handles it on its own.
+        </p>
+        <textarea id="compare-prompt-input" rows="3" placeholder="Ask something..."></textarea>
+        <div class="compare-columns">
+          <div class="compare-column">
+            <select id="compare-model-a"></select>
+            <div class="compare-output" id="compare-output-a"></div>
+          </div>
+          <div class="compare-column">
+            <select id="compare-model-b"></select>
+            <div class="compare-output" id="compare-output-b"></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="modal-btn-secondary" id="compare-modal-close-btn" type="button">Close</button>
+        <button class="modal-btn-primary" id="compare-run-btn" type="button">Compare</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="help-modal-overlay">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h3>Getting started with AMERB AI</h3>
+        <button class="modal-close-btn" id="help-modal-close" type="button"><span data-icon="x" data-icon-size="18"></span></button>
+      </div>
+      <div class="modal-body help-modal-body">
+        <div class="help-section">
+          <h4><span data-icon="paperclip" data-icon-size="15"></span> Attach or reference documents</h4>
+          <p>Use the paperclip button to upload a file, or type <code>@</code> in the message box to reference any document already in your department's knowledge base — no re-upload needed.</p>
+        </div>
+        <div class="help-section">
+          <h4><span data-icon="mic" data-icon-size="15"></span> Voice input</h4>
+          <p>Click the mic button and speak — transcription runs locally on this machine and never leaves it. Click the mic again to stop and drop the text into the message box.</p>
+        </div>
+        <div class="help-section">
+          <h4><span data-icon="lightbulb" data-icon-size="15"></span> Saved prompts</h4>
+          <p>Workspace menu → Saved prompts. Save anything you type often and reuse it with one click, instead of retyping it each time.</p>
+        </div>
+        <div class="help-section">
+          <h4><span data-icon="search" data-icon-size="15"></span> Search all chats</h4>
+          <p>The search icon next to the sidebar's chat filter searches inside every message you've ever sent — not just chat titles.</p>
+        </div>
+        <div class="help-section">
+          <h4><span data-icon="refresh" data-icon-size="15"></span> Regenerate &amp; compare answers</h4>
+          <p>Not happy with a reply? Regenerate it and flip between versions with the arrows underneath. Or open Workspace → Compare models to run the same prompt against two models side by side.</p>
+        </div>
+        <div class="help-section">
+          <h4><span data-icon="volume" data-icon-size="15"></span> Read replies aloud</h4>
+          <p>Every AMERB AI reply has a speaker icon underneath it — click it to have the answer read aloud.</p>
+        </div>
+        <div class="help-section">
+          <h4><span data-icon="sliders" data-icon-size="15"></span> Custom instructions</h4>
+          <p>Workspace menu → Custom instructions. Tell AMERB AI how you'd like it to respond — it applies to every new message, in every conversation.</p>
+        </div>
+        <div class="help-section">
+          <h4>Keyboard shortcuts</h4>
+          <p><code>Ctrl+K</code> new chat · <code>↑</code> (empty box) edit your last message · <code>Esc</code> close any open panel or menu.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="search-modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Search all chats</h3>
+        <button class="modal-close-btn" id="search-modal-close" type="button"><span data-icon="x" data-icon-size="18"></span></button>
+      </div>
+      <div class="modal-body">
+        <input type="text" id="search-modal-input" placeholder="Search inside every message you've sent or received...">
+        <div class="search-results" id="search-modal-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="prompts-modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Saved prompts</h3>
+        <button class="modal-close-btn" id="prompts-modal-close" type="button"><span data-icon="x" data-icon-size="18"></span></button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-hint">Save prompts you reuse often — click one to drop it straight into the composer.</p>
+        <div class="prompt-add-form">
+          <input type="text" id="prompt-title-input" placeholder="Title (e.g. \"Summarize a policy doc\")">
+          <textarea id="prompt-content-input" rows="3" placeholder="The prompt text itself..."></textarea>
+          <button class="btn-primary btn-compact" id="prompt-add-btn" type="button">Save prompt</button>
+        </div>
+        <div class="saved-prompts-list" id="saved-prompts-list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/js/icons.js"></script>
+<script src="/js/theme.js"></script>
+<script src="/js/markdown.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

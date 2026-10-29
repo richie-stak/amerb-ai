@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Knowledge base · AMERB AI</title>
+<link rel="icon" href="/img/favicon.png">
+<link rel="stylesheet" href="/css/style.css">
+<script>
+(function () {
+  var t = localStorage.getItem('amerb-theme');
+  if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+</head>
+<body>
+<div class="kb-shell hidden" id="kb-shell">
+  <header class="admin-header">
+    <div class="admin-header-brand">
+      <img class="mark" src="/img/amenfiman-mark.png" alt="Amenfiman Community Bank">
+      <span>AMERB AI · Knowledge base</span>
+    </div>
+    <div class="admin-header-actions">
+      <button class="header-theme-toggle-btn" id="theme-toggle-btn" type="button"></button>
+      <a href="/" class="admin-back-link">&larr; Back to chat</a>
+    </div>
+  </header>
+
+  <div class="kb-body">
+    <div class="banner hidden" id="kb-error"></div>
+
+    <div class="kb-toolbar">
+      <div>
+        <h2 id="kb-title">Knowledge base</h2>
+        <p class="admin-panel-hint" id="kb-subtitle">Documents your department has uploaded, used to answer questions in chat.</p>
+      </div>
+      <div class="kb-toolbar-actions">
+        <select id="kb-department-filter" class="hidden"></select>
+        <label class="kb-bankwide-toggle hidden" id="kb-bankwide-toggle">
+          <input type="checkbox" id="kb-bankwide-checkbox">
+          Publish bank-wide
+        </label>
+        <button class="btn-primary btn-compact" id="kb-upload-btn"><span data-icon="plus" data-icon-size="14"></span> Add files</button>
+        <input type="file" id="kb-file-input" class="hidden" multiple accept=".pdf,.docx,.xlsx,.xls,.xlsm,.csv,.txt,.md,.png,.jpg,.jpeg,.webp,.bmp,.gif">
+      </div>
+    </div>
+
+    <div id="kb-no-department" class="kb-empty hidden">
+      <span data-icon="alertTriangle" data-icon-size="26"></span>
+      <span>Your account has no department assigned yet. Ask an admin to assign one from the admin portal before you can use the knowledge base.</span>
+    </div>
+
+    <div id="kb-bankwide-section" class="hidden">
+      <div class="kb-folder kb-folder-bankwide">
+        <div class="kb-folder-header">
+          <span data-icon="bank" data-icon-size="16"></span><span>Bank-wide</span>
+          <span class="count" id="kb-bankwide-count"></span>
+        </div>
+        <div id="kb-bankwide-list"></div>
+      </div>
+    </div>
+
+    <div id="kb-folders"></div>
+  </div>
+</div>
+
+<script src="/js/icons.js"></script>
+<script src="/js/theme.js"></script>
+<script src="/js/knowledge.js"></script>
+</body>
+</html>

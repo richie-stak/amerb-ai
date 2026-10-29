@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Log in · AMERB AI</title>
+<link rel="icon" href="/img/favicon.png">
+<link rel="stylesheet" href="/css/style.css">
+<script>
+(function () {
+  var t = localStorage.getItem('amerb-theme');
+  if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+</head>
+<body>
+<div class="auth-shell">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <img src="/img/amenfiman-logo.png" alt="Amenfiman Community Bank">
+      <span class="auth-app-name">AMERB AI</span>
+    </div>
+    <h1>Welcome back</h1>
+    <p class="subtitle">Sign in to Amenfiman Community Bank's internal AI assistant.</p>
+
+    <div class="auth-error" id="error"></div>
+
+    <form id="login-form">
+      <div class="field">
+        <label for="identifier">Username or email</label>
+        <input type="text" id="identifier" name="identifier" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="btn-primary" id="submit-btn">Log in</button>
+    </form>
+
+    <div class="auth-switch">
+      Don't have an account? <a href="/signup.html">Sign up</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const form = document.getElementById('login-form');
+const errorBox = document.getElementById('error');
+const submitBtn = document.getElementById('submit-btn');
+
+function showError(msg) {
+  errorBox.textContent = msg;
+  errorBox.classList.add('show');
+}
+
+// If already logged in, skip straight to the app.
+fetch('/api/session').then(r => r.json()).then(d => {
+  if (d.authenticated) window.location.href = '/';
+});
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  errorBox.classList.remove('show');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Logging in...';
+
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        identifier: document.getElementById('identifier').value,
+        password: document.getElementById('password').value,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Login failed');
+    window.location.href = '/';
+  } catch (err) {
+    showError(err.message);
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Log in';
+  }
+});
+</script>
+</body>
+</html>

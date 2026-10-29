@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign up · AMERB AI</title>
+<link rel="icon" href="/img/favicon.png">
+<link rel="stylesheet" href="/css/style.css">
+<script>
+(function () {
+  var t = localStorage.getItem('amerb-theme');
+  if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+</head>
+<body>
+<div class="auth-shell">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <img src="/img/amenfiman-logo.png" alt="Amenfiman Community Bank">
+      <span class="auth-app-name">AMERB AI</span>
+    </div>
+    <h1>Create your account</h1>
+    <p class="subtitle" id="subtitle">Amenfiman Community Bank's internal AI assistant.</p>
+
+    <div class="auth-error" id="error"></div>
+
+    <form id="signup-form">
+      <div class="field">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" autocomplete="username" minlength="3" maxlength="32" required>
+      </div>
+      <div class="field">
+        <label for="email">Work email</label>
+        <input type="email" id="email" name="email" autocomplete="email" placeholder="you@amenfimanbank.com" required>
+        <div class="field-hint" id="email-hint">Must be an @amenfimanbank.com address.</div>
+      </div>
+      <div class="field">
+        <label for="department">Department</label>
+        <select id="department" name="department" required>
+          <option value="" disabled selected>Select your department</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="new-password" minlength="8" required>
+        <div class="field-hint">At least 8 characters.</div>
+      </div>
+      <button type="submit" class="btn-primary" id="submit-btn">Sign up</button>
+    </form>
+
+    <div class="auth-switch">
+      Already have an account? <a href="/login.html">Log in</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const form = document.getElementById('signup-form');
+const errorBox = document.getElementById('error');
+const submitBtn = document.getElementById('submit-btn');
+const departmentSelect = document.getElementById('department');
+const emailHint = document.getElementById('email-hint');
+
+function showError(msg) {
+  errorBox.textContent = msg;
+  errorBox.classList.add('show');
+}
+
+fetch('/api/session').then(r => r.json()).then(d => {
+  if (d.authenticated) window.location.href = '/';
+});
+
+fetch('/api/auth/departments').then(r => r.json()).then((d) => {
+  for (const dept of d.departments) {
+    const opt = document.createElement('option');
+    opt.value = dept;
+    opt.textContent = dept;
+    departmentSelect.appendChild(opt);
+  }
+  if (d.allowedEmailDomain) {
+    emailHint.textContent = `Must be an @${d.allowedEmailDomain} address.`;
+  }
+});
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  errorBox.classList.remove('show');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Creating account...';
+
+  try {
+    const res = await fetch('/api/auth/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: document.getElementById('username').value,
+        email: document.getElementById('email').value,
+        password: document.getElementById('password').value,
+        department: departmentSelect.value,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Sign up failed');
+    window.location.href = '/';
+  } catch (err) {
+    showError(err.message);
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Sign up';
+  }
+});
+</script>
+</body>
+</html>

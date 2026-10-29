@@ -1,0 +1,9 @@
+node_modules/
+data/*.sqlite*
+data/*.db
+.env
+imagegen/venv/
+imagegen/__pycache__/
+certs/
+*.log
+__pycache__/

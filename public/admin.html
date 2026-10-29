@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin · AMERB AI</title>
+<link rel="icon" href="/img/favicon.png">
+<link rel="stylesheet" href="/css/style.css">
+<script>
+(function () {
+  var t = localStorage.getItem('amerb-theme');
+  if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+</head>
+<body>
+<div class="admin-shell hidden" id="admin-shell">
+  <header class="admin-header">
+    <div class="admin-header-brand">
+      <img class="mark" src="/img/amenfiman-mark.png" alt="Amenfiman Community Bank">
+      <span>AMERB AI · Admin portal</span>
+    </div>
+    <div class="admin-header-actions">
+      <button class="header-theme-toggle-btn" id="theme-toggle-btn" type="button"></button>
+      <a href="/" class="admin-back-link">&larr; Back to chat</a>
+    </div>
+  </header>
+
+  <div class="admin-body">
+    <nav class="admin-tabs">
+      <button class="admin-tab active" data-tab="users"><span data-icon="users" data-icon-size="15"></span> Users</button>
+      <button class="admin-tab" data-tab="models"><span data-icon="cpu" data-icon-size="15"></span> Local LLMs</button>
+      <button class="admin-tab" data-tab="documents"><span data-icon="folder" data-icon-size="15"></span> Knowledge base</button>
+      <button class="admin-tab" data-tab="tools"><span data-icon="sliders" data-icon-size="15"></span> Tools</button>
+      <button class="admin-tab" data-tab="analytics"><span data-icon="barChart" data-icon-size="15"></span> Analytics</button>
+      <button class="admin-tab" data-tab="system"><span data-icon="database" data-icon-size="15"></span> System</button>
+    </nav>
+
+    <div class="admin-content">
+      <div class="banner hidden" id="admin-error"></div>
+
+      <!-- Users -->
+      <section class="admin-panel" id="panel-users">
+        <h2>Users</h2>
+        <p class="admin-panel-hint">Manage staff accounts, departments, and admin access.</p>
+
+        <h3 class="admin-subheading">Bulk import staff (CSV)</h3>
+        <p class="admin-panel-hint hint-tight">
+          One row per person: <code>username,email,department</code> (department is optional, header row
+          optional). Each new account gets a temporary password shown once below — share it with that
+          person yourself.
+        </p>
+        <div class="pull-model-form">
+          <input type="file" id="import-csv-input" accept=".csv,text/csv" class="hidden">
+          <button class="btn-primary btn-compact" id="import-csv-btn" type="button">
+            <span data-icon="upload" data-icon-size="14"></span> Choose CSV and import
+          </button>
+        </div>
+        <div class="import-results hidden" id="import-results"></div>
+
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Email</th>
+                <th>Department</th>
+                <th>Role</th>
+                <th>Joined</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Models -->
+      <section class="admin-panel hidden" id="panel-models">
+        <h2>Local LLMs</h2>
+        <p class="admin-panel-hint">Models installed in your local Ollama instance. Pulling downloads a model from the Ollama library — this can take a while depending on model size and your connection.</p>
+
+        <div class="pull-model-form">
+          <input type="text" id="pull-model-input" placeholder="e.g. llama3.1, mistral, qwen2.5:7b">
+          <button class="btn-primary btn-compact" id="pull-model-btn">Pull model</button>
+        </div>
+        <div class="pull-progress hidden" id="pull-progress"></div>
+
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Size</th>
+                <th>Modified</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="models-tbody"></tbody>
+          </table>
+        </div>
+
+        <h3 class="admin-subheading">House model</h3>
+        <p class="admin-panel-hint">
+          Wrap any installed model with a permanent AMERB AI persona and instructions, baked in at the Ollama
+          level so it applies no matter what's asked. This does not change the base model's underlying
+          knowledge or weights — it's not fine-tuning, just a fixed system prompt attached to a new model name
+          that shows up in the model picker like any other.
+        </p>
+        <div class="house-model-form">
+          <div class="field">
+            <label for="house-model-base">Base model</label>
+            <select id="house-model-base"></select>
+          </div>
+          <div class="field">
+            <label for="house-model-name">New model name</label>
+            <input type="text" id="house-model-name" value="amerb-ai" placeholder="amerb-ai">
+          </div>
+          <div class="field">
+            <label for="house-model-prompt">System prompt</label>
+            <textarea id="house-model-prompt" rows="6">You are AMERB AI, the official internal assistant for Amenfiman Community Bank staff. Be professional, concise, and accurate. Always follow the bank's policies and never share information you are not confident about. When unsure, say so plainly rather than guessing.</textarea>
+          </div>
+          <button class="btn-primary btn-compact" id="house-model-create-btn">Create / update house model</button>
+        </div>
+        <div class="pull-progress hidden" id="house-model-progress"></div>
+      </section>
+
+      <!-- Documents -->
+      <section class="admin-panel hidden" id="panel-documents">
+        <h2>Knowledge base</h2>
+        <p class="admin-panel-hint">Documents uploaded by staff, grouped by department. These are used to answer department-specific questions in chat.</p>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Filename</th>
+                <th>Department</th>
+                <th>Uploaded by</th>
+                <th>Size</th>
+                <th>Added</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="documents-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Tools -->
+      <section class="admin-panel hidden" id="panel-tools">
+        <h2>Tools</h2>
+        <p class="admin-panel-hint">
+          AMERB AI can use tools during chat: a sandboxed math/data calculator (always available, no setup
+          needed), a web page fetcher restricted to domains you approve below, an optional web search, and
+          document/image generation. Web search is the one tool that sends user-typed text to an external
+          service (DuckDuckGo) rather than only fetching pre-approved pages, so it's off by default.
+        </p>
+
+        <h3 class="admin-subheading">Web search</h3>
+        <label class="settings-toggle-row">
+          <input type="checkbox" id="web-search-toggle">
+          <span>Allow AMERB AI to search the public internet (queries are sent to DuckDuckGo)</span>
+        </label>
+        <p class="admin-panel-hint hint-spaced">
+          When enabled, the model can call a search tool for current information, then read one of the
+          result pages with the web fetch tool below — even if that page's domain isn't on your approved list.
+        </p>
+
+        <label class="settings-toggle-row">
+          <input type="checkbox" id="search-restricted-toggle">
+          <span>Restrict search to only the approved domains below (no open-web results)</span>
+        </label>
+        <p class="admin-panel-hint hint-spaced">
+          When on, every search — whether the model calls it or a user forces it with the globe icon — is scoped
+          to only the domains approved below, using DuckDuckGo's own site-restriction. If no domains are
+          approved, search will refuse until you add at least one.
+        </p>
+
+        <h3 class="admin-subheading">Approved domains for the web fetch tool</h3>
+        <div class="pull-model-form">
+          <input type="text" id="domain-input" placeholder="e.g. bog.gov.gh">
+          <button class="btn-primary btn-compact" id="domain-add-btn">Add domain</button>
+        </div>
+        <p class="admin-panel-hint hint-tight">Adding a domain also approves its subdomains (e.g. adding "example.com" allows "www.example.com").</p>
+
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Domain</th>
+                <th>Added by</th>
+                <th>Added</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="domains-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Analytics -->
+      <section class="admin-panel hidden" id="panel-analytics">
+        <h2>Analytics</h2>
+        <p class="admin-panel-hint">Usage across the bank — refreshed each time you open this tab.</p>
+
+        <div class="analytics-stat-cards" id="analytics-totals"></div>
+
+        <div class="analytics-grid">
+          <div class="analytics-block">
+            <h3 class="admin-subheading">Messages by department</h3>
+            <div class="admin-table-wrap">
+              <table class="admin-table">
+                <thead><tr><th>Department</th><th>Messages</th></tr></thead>
+                <tbody id="analytics-department-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="analytics-block">
+            <h3 class="admin-subheading">Messages by model</h3>
+            <div class="admin-table-wrap">
+              <table class="admin-table">
+                <thead><tr><th>Model</th><th>Replies</th></tr></thead>
+                <tbody id="analytics-model-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="analytics-block">
+            <h3 class="admin-subheading">Response feedback</h3>
+            <div class="analytics-stat-cards" id="analytics-feedback"></div>
+          </div>
+
+          <div class="analytics-block">
+            <h3 class="admin-subheading">Most active staff</h3>
+            <div class="admin-table-wrap">
+              <table class="admin-table">
+                <thead><tr><th>Username</th><th>Department</th><th>Messages</th></tr></thead>
+                <tbody id="analytics-users-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="analytics-block">
+            <h3 class="admin-subheading">Most-cited documents</h3>
+            <div class="admin-table-wrap">
+              <table class="admin-table">
+                <thead><tr><th>Filename</th><th>Citations</th></tr></thead>
+                <tbody id="analytics-documents-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- System -->
+      <section class="admin-panel hidden" id="panel-system">
+        <h2>System</h2>
+        <p class="admin-panel-hint">Backups and data retention for the app's SQLite database.</p>
+
+        <h3 class="admin-subheading">Backup</h3>
+        <p class="admin-panel-hint hint-tight">
+          Downloads a complete, consistent snapshot of the database — everything: users, conversations,
+          documents, settings. Safe to run any time, including while staff are actively using the app.
+        </p>
+        <button class="btn-primary btn-compact" id="backup-download-btn" type="button">
+          <span data-icon="download" data-icon-size="14"></span> Download backup
+        </button>
+
+        <h3 class="admin-subheading">Conversation retention</h3>
+        <p class="admin-panel-hint hint-tight">
+          Automatically delete conversations older than this many days. Runs once a day on its own; 0 means
+          keep everything indefinitely. This cannot be undone — take a backup first if unsure.
+        </p>
+        <div class="pull-model-form">
+          <input type="number" id="retention-days-input" min="0" placeholder="0 = keep forever" style="max-width: 160px;">
+          <button class="btn-primary btn-compact" id="retention-save-btn" type="button">Save</button>
+          <button class="btn-primary btn-compact danger" id="retention-cleanup-btn" type="button">Clean up now</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="reset-password-modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Temporary password</h3>
+        <button class="modal-close-btn" id="reset-password-modal-close" type="button"><span data-icon="x" data-icon-size="18"></span></button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-hint">
+          Share this with <strong id="reset-password-username"></strong> yourself — it's shown here only once and
+          isn't stored anywhere. Ask them to change it after logging in.
+        </p>
+        <div class="temp-password-row">
+          <input type="text" id="reset-password-value" readonly>
+          <button class="btn-primary btn-compact" id="reset-password-copy-btn" type="button">
+            <span data-icon="copy" data-icon-size="14"></span> Copy
+          </button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="modal-btn-primary" id="reset-password-modal-done" type="button">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/js/icons.js"></script>
+<script src="/js/theme.js"></script>
+<script src="/js/admin.js"></script>
+</body>
+</html>
