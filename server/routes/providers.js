@@ -4,6 +4,7 @@ const express = require('express');
 const { requireAdmin } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const { fetchProviderModels } = require('../llm');
+const { auditAdminChanges } = require('../audit');
 const {
   PROVIDER_TYPES,
   listProviders,
@@ -17,6 +18,8 @@ const {
 
 const router = express.Router();
 router.use(requireAdmin);
+// Every admin change (anything but a read) goes into the audit log automatically.
+router.use(auditAdminChanges);
 
 function cleanBaseUrl(raw) {
   const value = String(raw || '').trim().replace(/\/+$/, '');

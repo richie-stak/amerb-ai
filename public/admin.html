@@ -34,6 +34,7 @@
       <button class="admin-tab" data-tab="documents"><span data-icon="folder" data-icon-size="15"></span> Knowledge base</button>
       <button class="admin-tab" data-tab="tools"><span data-icon="sliders" data-icon-size="15"></span> Tools</button>
       <button class="admin-tab" data-tab="analytics"><span data-icon="barChart" data-icon-size="15"></span> Analytics</button>
+      <button class="admin-tab" data-tab="audit"><span data-icon="book" data-icon-size="15"></span> Audit log</button>
       <button class="admin-tab" data-tab="system"><span data-icon="database" data-icon-size="15"></span> System</button>
     </nav>
 
@@ -298,6 +299,46 @@
               </table>
             </div>
           </div>
+        </div>
+      </section>
+
+      <!-- Audit log -->
+      <section class="admin-panel hidden" id="panel-audit">
+        <h2>Audit log</h2>
+        <p class="admin-panel-hint">
+          A permanent record of sign-ins (including failed and locked-out attempts), every question asked in chat
+          and which model answered it, document uploads, deletions and sharing, and every admin change. Entries
+          can't be edited or deleted, and they remain after an account or chat is deleted. Passwords and API keys
+          are never recorded. Times are shown in your computer's time zone.
+        </p>
+        <div class="audit-filters">
+          <input type="search" id="audit-user" placeholder="User name">
+          <select id="audit-action">
+            <option value="">All activity</option>
+            <option value="auth">Sign-ins</option>
+            <option value="chat">Chat questions</option>
+            <option value="document">Documents</option>
+            <option value="admin">Admin changes</option>
+          </select>
+          <label>From <input type="date" id="audit-from"></label>
+          <label>To <input type="date" id="audit-to"></label>
+          <button class="btn-primary btn-compact" id="audit-search-btn" type="button">Show</button>
+          <a class="table-btn" id="audit-export-btn" href="/api/admin/audit/export.csv">Export CSV</a>
+        </div>
+        <div class="admin-doc-counts" id="audit-count"></div>
+        <div class="admin-table-wrap">
+          <table class="admin-table audit-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>User</th>
+                <th>Activity</th>
+                <th>Details</th>
+                <th>IP address</th>
+              </tr>
+            </thead>
+            <tbody id="audit-tbody"></tbody>
+          </table>
         </div>
       </section>
 

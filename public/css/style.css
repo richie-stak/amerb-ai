@@ -2702,3 +2702,44 @@ a {
 .composer-hint.is-external {
   color: var(--brand-red);
 }
+
+/* ---------- Admin portal: audit log ---------- */
+
+.audit-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin: 4px 0 10px;
+  font-size: 13px;
+}
+
+.audit-filters input,
+.audit-filters select {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-main);
+  color: var(--text-main);
+  font: inherit;
+}
+
+.audit-filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+}
+
+.audit-table td:nth-child(4) {
+  max-width: 520px;
+  word-break: break-word;
+}
+
+.audit-table td:first-child {
+  white-space: nowrap;
+}
+
+.audit-table tr.audit-warning td {
+  color: var(--brand-red);
+}

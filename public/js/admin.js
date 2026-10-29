@@ -12,6 +12,7 @@
     tools: document.getElementById('panel-tools'),
     analytics: document.getElementById('panel-analytics'),
     system: document.getElementById('panel-system'),
+    audit: document.getElementById('panel-audit'),
   };
 
   let departments = [];
@@ -99,7 +100,103 @@
       el.classList.toggle('hidden', key !== name);
     }
     if (name === 'analytics') loadAnalytics();
+    if (name === 'audit') loadAudit();
   }
+
+  // ---------- Audit log ----------
+
+  const AUDIT_LABELS = {
+    'auth.login': 'Signed in',
+    'auth.login_failed': 'Failed sign-in',
+    'auth.account_locked': 'Account locked',
+    'auth.logout': 'Signed out',
+    'auth.signup': 'Created account',
+    'auth.password_changed': 'Changed own password',
+    'chat.message': 'Asked a question',
+    'document.upload': 'Uploaded documents',
+    'document.delete': 'Deleted a document',
+    'document.share': 'Shared a document',
+    'admin.post': 'Admin change',
+    'admin.patch': 'Admin change',
+    'admin.put': 'Admin change',
+    'admin.delete': 'Admin deletion',
+  };
+
+  // One readable line per entry — the full details are still in the CSV export.
+  function auditSummary(row) {
+    const d = row.details || {};
+    switch (row.action) {
+      case 'chat.message':
+        return `${d.external ? '☁ ' : ''}${d.model}: "${d.question}"${d.attachments?.length ? ` · files: ${d.attachments.join(', ')}` : ''}`;
+      case 'auth.login_failed':
+        return [d.reason, d.identifier ? `as "${d.identifier}"` : '', d.failedAttempts ? `attempt ${d.failedAttempts}` : ''].filter(Boolean).join(' · ');
+      case 'auth.account_locked':
+        return `after ${d.failedAttempts} failed attempts`;
+      case 'document.upload':
+        return `${d.scope === 'global' ? 'Bank-wide' : d.scope === 'personal' ? 'My files' : `${d.department} department`}: ${(d.files || []).join(', ')}`;
+      case 'document.delete':
+        return `${d.filename} (${d.scope === 'global' ? 'bank-wide' : d.scope === 'personal' ? 'personal' : d.department})`;
+      case 'document.share':
+        return `${d.filename}: ${d.from} → ${d.to === 'global' ? 'bank-wide' : d.department}`;
+      default:
+        if (row.action.startsWith('admin.')) {
+          const body = d.body && Object.keys(d.body).length ? ` ${JSON.stringify(d.body)}` : '';
+          return `${row.action.slice(6).toUpperCase()} ${d.path}${body}`;
+        }
+        return Object.keys(d).length ? JSON.stringify(d) : '';
+    }
+  }
+
+  function auditQuery() {
+    const params = new URLSearchParams();
+    const add = (key, id) => {
+      const value = document.getElementById(id).value.trim();
+      if (value) params.set(key, value);
+    };
+    add('user', 'audit-user');
+    add('action', 'audit-action');
+    add('from', 'audit-from');
+    add('to', 'audit-to');
+    return params;
+  }
+
+  async function loadAudit() {
+    const params = auditQuery();
+    document.getElementById('audit-export-btn').href = `/api/admin/audit/export.csv?${params}`;
+    params.set('limit', '300');
+    const res = await fetch(`/api/admin/audit?${params}`);
+    const data = await res.json();
+    if (!res.ok) return showError(data.error || 'Could not load the audit log');
+
+    const tbody = document.getElementById('audit-tbody');
+    tbody.innerHTML = '';
+    document.getElementById('audit-count').textContent =
+      data.total > data.rows.length ? `Showing the latest ${data.rows.length} of ${data.total} entries — export to CSV for all of them.` : `${data.total} entries`;
+    if (!data.rows.length) return renderEmptyRow(tbody, 5, 'No activity matches these filters.');
+
+    for (const row of data.rows) {
+      const tr = document.createElement('tr');
+      const cells = [
+        new Date(`${row.at.replace(' ', 'T')}Z`).toLocaleString(),
+        row.username ? `${row.username}${row.department ? ` (${row.department})` : ''}` : '—',
+        AUDIT_LABELS[row.action] || row.action,
+        auditSummary(row),
+        row.ip || '',
+      ];
+      for (const text of cells) {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      if (row.action === 'auth.login_failed' || row.action === 'auth.account_locked') tr.classList.add('audit-warning');
+      tbody.appendChild(tr);
+    }
+  }
+
+  document.getElementById('audit-search-btn').addEventListener('click', loadAudit);
+  document.getElementById('audit-user').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') loadAudit();
+  });
 
   // ---------- Users ----------
 

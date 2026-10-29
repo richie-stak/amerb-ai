@@ -7,6 +7,7 @@ const { extractText, chunkText, isImageFile, imageMimeType } = require('../docum
 const { BANKWIDE_DEPARTMENT, DEPARTMENTS } = require('../departments');
 const { SCOPES, scopeOf, canAccessDoc, canDeleteDoc, searchableWhere } = require('../documentAccess');
 const { indexPendingChunks } = require('../embeddings');
+const { logAudit } = require('../audit');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -183,6 +184,11 @@ router.post('/', upload.array('files', 5), asyncHandler(async (req, res) => {
 
   // Make the new files searchable by meaning straight away rather than at the next background pass.
   indexPendingChunks();
+  logAudit(req, 'document.upload', {
+    scope: target.isPersonal ? 'personal' : targetDepartment === BANKWIDE_DEPARTMENT ? 'global' : 'department',
+    department: targetDepartment,
+    files: results.map((r) => (r.error ? `${r.filename} (failed: ${r.error})` : r.filename)),
+  }, user);
   res.json({ results });
 }));
 
@@ -292,6 +298,7 @@ router.delete('/:id', (req, res) => {
   }
 
   db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
+  logAudit(req, 'document.delete', { documentId: doc.id, filename: doc.filename, scope: scopeOf(doc), department: doc.department }, user);
   res.json({ ok: true });
 });
 
@@ -319,6 +326,7 @@ router.patch('/:id/share', (req, res) => {
     return res.status(400).json({ error: 'scope must be "department" or "global"' });
   }
   const updated = db.prepare('SELECT * FROM documents WHERE id = ?').get(doc.id);
+  logAudit(req, 'document.share', { documentId: doc.id, filename: doc.filename, from: scopeOf(doc), to: scopeOf(updated), department: updated.department }, user);
   res.json({ ok: true, scope: scopeOf(updated), department: updated.department });
 });
 

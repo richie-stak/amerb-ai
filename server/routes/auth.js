@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const db = require('../db');
 const asyncHandler = require('../middleware/asyncHandler');
+const { logAudit } = require('../audit');
 const { DEPARTMENTS } = require('../departments');
 
 const router = express.Router();
@@ -69,6 +70,7 @@ router.post('/signup', asyncHandler(async (req, res) => {
     .run(cleanUsername, cleanEmail, passwordHash, department);
 
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
+  logAudit(req, 'auth.signup', { email: user.email }, user);
 
   req.session.regenerate((err) => {
     if (err) return res.status(500).json({ error: 'Could not start session' });
@@ -90,6 +92,7 @@ router.post('/login', asyncHandler(async (req, res) => {
     .get(identifier.trim(), clean);
 
   if (!user) {
+    logAudit(req, 'auth.login_failed', { identifier: identifier.trim(), reason: 'unknown account' }, null);
     return res.status(401).json({ error: 'Invalid username/email or password' });
   }
 
@@ -97,6 +100,7 @@ router.post('/login', asyncHandler(async (req, res) => {
     const lockedUntil = parseUtc(user.locked_until);
     if (lockedUntil > new Date()) {
       const minutesLeft = Math.ceil((lockedUntil - new Date()) / 60000);
+      logAudit(req, 'auth.login_failed', { reason: 'account locked' }, user);
       return res
         .status(429)
         .json({ error: `Too many failed attempts. Try again in ${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}.` });
@@ -114,11 +118,13 @@ router.post('/login', asyncHandler(async (req, res) => {
         failedCount,
         user.id
       );
+      logAudit(req, 'auth.account_locked', { failedAttempts: failedCount }, user);
       return res
         .status(429)
         .json({ error: `Too many failed attempts. Account locked for ${LOCKOUT_MINUTES} minutes.` });
     }
     db.prepare('UPDATE users SET failed_login_count = ? WHERE id = ?').run(failedCount, user.id);
+    logAudit(req, 'auth.login_failed', { reason: 'wrong password', failedAttempts: failedCount }, user);
     return res.status(401).json({ error: 'Invalid username/email or password' });
   }
 
@@ -126,6 +132,7 @@ router.post('/login', asyncHandler(async (req, res) => {
     db.prepare('UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?').run(user.id);
   }
 
+  logAudit(req, 'auth.login', {}, user);
   req.session.regenerate((err) => {
     if (err) return res.status(500).json({ error: 'Could not start session' });
     req.session.userId = user.id;
@@ -134,8 +141,9 @@ router.post('/login', asyncHandler(async (req, res) => {
 }));
 
 router.post('/logout', (req, res) => {
+  if (req.session?.userId) logAudit(req, 'auth.logout');
   req.session.destroy(() => {
-    res.clearCookie('connect.sid');
+    res.clearCookie('amerb.sid');
     res.json({ ok: true });
   });
 });
@@ -187,6 +195,7 @@ router.patch('/me/password', asyncHandler(async (req, res) => {
 
   const passwordHash = await bcrypt.hash(newPassword, 12);
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, user.id);
+  logAudit(req, 'auth.password_changed', {}, user);
   res.json({ ok: true });
 }));
 

@@ -7,6 +7,7 @@ const { TOOL_DEFS, executeTool, webSearch } = require('../tools');
 const { isWebSearchEnabled, getHouseModel } = require('../settings');
 const { addMemory, memoryPrompt } = require('../memory');
 const llm = require('../llm');
+const { logAudit } = require('../audit');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -546,6 +547,14 @@ router.post('/stream', asyncHandler(async (req, res) => {
   const insertResult = db
     .prepare('INSERT INTO messages (conversation_id, role, content, attachments) VALUES (?, ?, ?, ?)')
     .run(convo.id, 'user', content, attachmentsMeta.length ? JSON.stringify(attachmentsMeta) : null);
+  logAudit(req, 'chat.message', {
+    conversationId: convo.id,
+    model,
+    external: llm.isExternal(model),
+    question: content,
+    attachments: attachmentsMeta.map((a) => a.filename),
+    webSearch: Boolean(forceWebSearch),
+  }, user);
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
