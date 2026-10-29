@@ -7,6 +7,7 @@
   const panels = {
     users: document.getElementById('panel-users'),
     models: document.getElementById('panel-models'),
+    providers: document.getElementById('panel-providers'),
     documents: document.getElementById('panel-documents'),
     tools: document.getElementById('panel-tools'),
     analytics: document.getElementById('panel-analytics'),
@@ -87,7 +88,7 @@
     // loadSettings() restores the saved house-model base-model selection, which requires the
     // base-model <select> to already be populated — so loadModels() must finish first.
     await loadModels();
-    await Promise.all([loadUsers(), loadDocuments(), loadDomains(), loadSettings()]);
+    await Promise.all([loadUsers(), loadDocuments(), loadDomains(), loadSettings(), loadProviders()]);
   }
 
   function selectTab(name) {
@@ -449,20 +450,262 @@
     }
   });
 
-  // ---------- Documents ----------
+  // ---------- External AI providers ----------
 
-  async function loadDocuments() {
-    const res = await fetch('/api/documents');
-    const data = await res.json();
-    if (!res.ok) return showError(data.error || 'Could not load documents');
-    renderDocuments(data.documents);
+  const providerType = document.getElementById('provider-type');
+  const providerName = document.getElementById('provider-name');
+  const providerKey = document.getElementById('provider-key');
+  const providerBaseUrl = document.getElementById('provider-base-url');
+  const providerConnectBtn = document.getElementById('provider-connect-btn');
+  const providersList = document.getElementById('providers-list');
+  let providerTypes = {};
+
+  async function providerRequest(url, options = {}) {
+    const res = await fetch(url, {
+      ...options,
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    return data;
   }
 
-  function renderDocuments(documents) {
+  async function loadProviders() {
+    try {
+      const data = await providerRequest('/api/admin/providers');
+      providerTypes = data.types;
+      if (!providerType.options.length) {
+        for (const [value, info] of Object.entries(providerTypes)) {
+          const opt = document.createElement('option');
+          opt.value = value;
+          opt.textContent = info.label;
+          providerType.appendChild(opt);
+        }
+        applyProviderTypeDefaults();
+      }
+      renderProviders(data.providers);
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
+  // Picking a provider fills in its official API address; "Other" leaves it blank to be typed.
+  function applyProviderTypeDefaults() {
+    const info = providerTypes[providerType.value] || {};
+    providerBaseUrl.value = info.baseUrl || '';
+    providerName.placeholder = info.label ? `e.g. ${info.label.replace(/ \(.*\)$/, '')}` : '';
+    document.getElementById('provider-base-url-hint').textContent = info.baseUrl
+      ? 'Filled in for you — only change it for a self-hosted or regional endpoint.'
+      : "Your provider's OpenAI-compatible endpoint, e.g. https://api.groq.com/openai/v1";
+  }
+  providerType.addEventListener('change', applyProviderTypeDefaults);
+
+  providerConnectBtn.addEventListener('click', async () => {
+    hideError();
+    providerConnectBtn.disabled = true;
+    providerConnectBtn.textContent = 'Connecting...';
+    try {
+      await providerRequest('/api/admin/providers', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: providerType.value,
+          name: providerName.value,
+          apiKey: providerKey.value,
+          baseUrl: providerBaseUrl.value,
+        }),
+      });
+      providerKey.value = '';
+      providerName.value = '';
+      await loadProviders();
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      providerConnectBtn.disabled = false;
+      providerConnectBtn.textContent = 'Connect & load models';
+    }
+  });
+
+  function renderProviders(providers) {
+    providersList.innerHTML = '';
+    if (!providers.length) {
+      const empty = document.createElement('p');
+      empty.className = 'admin-panel-hint';
+      empty.textContent = 'No external providers connected. Staff can only use local models.';
+      providersList.appendChild(empty);
+      return;
+    }
+    for (const p of providers) providersList.appendChild(renderProviderCard(p));
+  }
+
+  function renderProviderCard(p) {
+    const card = document.createElement('div');
+    card.className = `provider-card${p.enabled ? '' : ' is-disabled'}`;
+
+    const header = document.createElement('div');
+    header.className = 'provider-card-header';
+    const title = document.createElement('div');
+    const nameEl = document.createElement('strong');
+    nameEl.textContent = p.name;
+    const meta = document.createElement('div');
+    meta.className = 'provider-card-meta';
+    meta.textContent = `${p.typeLabel} · ${p.baseUrl} · key ${p.keyHint} · ${p.enabledModels.length} of ${p.availableModels.length} models enabled`;
+    title.append(nameEl, meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'provider-card-actions';
+    const toggle = document.createElement('label');
+    toggle.className = 'provider-toggle';
+    const toggleInput = document.createElement('input');
+    toggleInput.type = 'checkbox';
+    toggleInput.checked = p.enabled;
+    toggleInput.addEventListener('change', () => saveProvider(p.id, { enabled: toggleInput.checked }));
+    toggle.append(toggleInput, document.createTextNode(' Enabled'));
+
+    const actionBtn = (label, onClick, danger) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `table-btn${danger ? ' danger' : ''}`;
+      btn.textContent = label;
+      btn.addEventListener('click', onClick);
+      return btn;
+    };
+    actions.append(
+      toggle,
+      actionBtn('Refresh models', async () => {
+        hideError();
+        try {
+          await providerRequest(`/api/admin/providers/${p.id}/refresh`, { method: 'POST' });
+          await loadProviders();
+        } catch (err) {
+          showError(err.message);
+        }
+      }),
+      actionBtn('Change key', async () => {
+        const apiKey = prompt(`New API key for ${p.name}:`);
+        if (apiKey) await saveProvider(p.id, { apiKey });
+      }),
+      actionBtn(
+        'Remove',
+        async () => {
+          if (!confirm(`Remove ${p.name}? Its models disappear from the model picker for everyone, and its API key is deleted.`)) return;
+          try {
+            await providerRequest(`/api/admin/providers/${p.id}`, { method: 'DELETE' });
+            await loadProviders();
+          } catch (err) {
+            showError(err.message);
+          }
+        },
+        true
+      )
+    );
+    header.append(title, actions);
+    card.appendChild(header);
+
+    // Model checklist — a filter box helps with providers that list hundreds of models.
+    const modelsWrap = document.createElement('div');
+    modelsWrap.className = 'provider-models';
+    const filter = document.createElement('input');
+    filter.type = 'search';
+    filter.className = 'provider-model-filter';
+    filter.placeholder = `Filter ${p.availableModels.length} models...`;
+    const grid = document.createElement('div');
+    grid.className = 'provider-model-grid';
+    const selected = new Set(p.enabledModels);
+    // Enabled models first, so they're visible without scrolling a long list.
+    const ordered = [...p.availableModels].sort((a, b) => Number(selected.has(b)) - Number(selected.has(a)) || a.localeCompare(b));
+    for (const modelId of ordered) {
+      const label = document.createElement('label');
+      label.className = 'provider-model';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = selected.has(modelId);
+      box.addEventListener('change', () => {
+        if (box.checked) selected.add(modelId);
+        else selected.delete(modelId);
+        saveProvider(p.id, { enabledModels: [...selected] });
+      });
+      label.append(box, document.createTextNode(` ${modelId}`));
+      grid.appendChild(label);
+    }
+    filter.addEventListener('input', () => {
+      const q = filter.value.trim().toLowerCase();
+      for (const label of grid.children) label.classList.toggle('hidden', Boolean(q) && !label.textContent.toLowerCase().includes(q));
+    });
+    const hint = document.createElement('div');
+    hint.className = 'field-hint';
+    hint.textContent = 'Tick the models staff may use. Changes save immediately.';
+    modelsWrap.append(filter, grid, hint);
+    card.appendChild(modelsWrap);
+    return card;
+  }
+
+  async function saveProvider(id, fields) {
+    hideError();
+    try {
+      await providerRequest(`/api/admin/providers/${id}`, { method: 'PATCH', body: JSON.stringify(fields) });
+    } catch (err) {
+      showError(err.message);
+    }
+    await loadProviders();
+  }
+
+  // ---------- Documents ----------
+
+  const documentsFilter = document.getElementById('documents-filter');
+  let allDocuments = [];
+
+  function knowledgeBaseLabel(d) {
+    if (d.scope === 'global') return 'Bank-wide';
+    if (d.scope === 'personal') return `Personal (${d.department})`;
+    return `${d.department} department`;
+  }
+
+  async function loadDocuments() {
+    // ?all=1 includes every staff member's personal chat files too, so an admin can manage storage.
+    const res = await fetch('/api/documents?all=1');
+    const data = await res.json();
+    if (!res.ok) return showError(data.error || 'Could not load documents');
+    allDocuments = data.documents;
+
+    // Filter options: the three kinds of knowledge base, then each department that has files.
+    const previous = documentsFilter.value;
+    const departments = [...new Set(allDocuments.filter((d) => d.scope === 'department').map((d) => d.department))].sort();
+    documentsFilter.innerHTML = '';
+    const options = [
+      ['', 'All knowledge bases'],
+      ['global', 'Bank-wide'],
+      ['department', 'All departments'],
+      ...departments.map((dep) => [`department:${dep}`, `— ${dep}`]),
+      ['personal', 'Personal (staff chat files)'],
+    ];
+    for (const [value, label] of options) {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      documentsFilter.appendChild(opt);
+    }
+    documentsFilter.value = options.some(([v]) => v === previous) ? previous : '';
+
+    const count = (scope) => allDocuments.filter((d) => d.scope === scope).length;
+    document.getElementById('documents-counts').textContent =
+      `${count('global')} bank-wide · ${count('department')} in departments · ${count('personal')} personal`;
+
+    renderDocuments();
+  }
+
+  documentsFilter.addEventListener('change', renderDocuments);
+
+  function renderDocuments() {
+    const filter = documentsFilter.value;
+    const documents = allDocuments.filter((d) => {
+      if (!filter) return true;
+      if (filter.startsWith('department:')) return d.scope === 'department' && d.department === filter.slice(11);
+      return d.scope === filter;
+    });
     const tbody = document.getElementById('documents-tbody');
     tbody.innerHTML = '';
 
-    if (!documents.length) return renderEmptyRow(tbody, 6, 'No documents uploaded yet.');
+    if (!documents.length) return renderEmptyRow(tbody, 6, filter ? 'No documents in this knowledge base.' : 'No documents uploaded yet.');
 
     for (const d of documents) {
       const tr = document.createElement('tr');
@@ -471,7 +714,7 @@
       tdName.textContent = d.filename;
 
       const tdDept = document.createElement('td');
-      tdDept.textContent = d.department;
+      tdDept.textContent = knowledgeBaseLabel(d);
 
       const tdUploader = document.createElement('td');
       tdUploader.textContent = d.uploaded_by;
@@ -483,11 +726,39 @@
       tdAdded.textContent = formatDate(d.created_at);
 
       const tdActions = document.createElement('td');
+      tdActions.className = 'admin-doc-actions';
+
+      const downloadLink = document.createElement('a');
+      downloadLink.className = 'table-btn';
+      downloadLink.href = `/api/documents/${d.id}/file?download=1`;
+      downloadLink.textContent = 'Download';
+      tdActions.appendChild(downloadLink);
+
+      // Turning a department file into bank policy is an admin decision, so it lives here. Personal
+      // files aren't offered this — their owner decides whether to share them first.
+      if (d.scope === 'department') {
+        const publishBtn = document.createElement('button');
+        publishBtn.className = 'table-btn';
+        publishBtn.textContent = 'Publish bank-wide';
+        publishBtn.addEventListener('click', async () => {
+          if (!confirm(`Publish "${d.filename}" bank-wide? Every member of staff will be able to search it, not just ${d.department}.`)) return;
+          const res = await fetch(`/api/documents/${d.id}/share`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope: 'global' }),
+          });
+          const data = await res.json();
+          if (!res.ok) return showError(data.error || 'Could not publish document');
+          await loadDocuments();
+        });
+        tdActions.appendChild(publishBtn);
+      }
+
       const deleteBtn = document.createElement('button');
       deleteBtn.className = 'table-btn danger';
       deleteBtn.textContent = 'Delete';
       deleteBtn.addEventListener('click', async () => {
-        if (!confirm(`Delete "${d.filename}" from the knowledge base?`)) return;
+        if (!confirm(`Delete "${d.filename}" from ${knowledgeBaseLabel(d)}?`)) return;
         const res = await fetch(`/api/documents/${d.id}`, { method: 'DELETE' });
         const data = await res.json();
         if (!res.ok) return showError(data.error || 'Could not delete document');

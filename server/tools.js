@@ -4,7 +4,8 @@ const net = require('node:net');
 const { Worker } = require('node:worker_threads');
 const { Agent } = require('undici');
 const db = require('./db');
-const { BANKWIDE_DEPARTMENT } = require('./departments');
+const { canAccessDoc } = require('./documentAccess');
+const { addMemory } = require('./memory');
 
 const MAX_ANALYZE_SHEETS = 5;
 const MAX_ANALYZE_ROWS = 5000;
@@ -25,7 +26,9 @@ const TOOL_DEFS = [
       name: 'run_code',
       description:
         'Evaluate a math/data expression for calculations — arithmetic, sums, averages, loan/interest ' +
-        'math, unit conversions, matrix operations. Multiple statements can be separated by newlines. ' +
+        'math, unit conversions, matrix operations. Multiple statements can be separated by newlines; each ' +
+        'line\'s value is returned, in order. Use ^ for powers (e.g. (1 + r)^n). Always use this for any figure ' +
+        'you report — never do multi-step arithmetic in your head. ' +
         'This is a restricted math language, not general-purpose code — no loops, files, or network access.',
       parameters: {
         type: 'object',
@@ -201,6 +204,26 @@ const TOOL_DEFS = [
           },
         },
         required: ['title', 'slides'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'save_memory',
+      description:
+        'Save a short fact about the user so you remember it in all their future conversations. Use this ' +
+        'when the user asks you to remember something ("remember that...", "from now on...", "note that I...") ' +
+        'or states a lasting preference about how you should respond. Write the fact in third person, e.g. ' +
+        '"Works in the Credit department" or "Prefers answers in bullet points". If the user gives several ' +
+        'facts at once, call this once per fact. Do not save passwords, ' +
+        'account numbers, or other sensitive personal data.',
+      parameters: {
+        type: 'object',
+        properties: {
+          fact: { type: 'string', description: 'The fact to remember, in one short sentence.' },
+        },
+        required: ['fact'],
       },
     },
   },
@@ -517,9 +540,29 @@ async function executeTool(name, args, context = {}) {
     args = args.parameters;
   }
 
+  if (name === 'save_memory') {
+    if (!context.user) return { text: 'Error: no user to save a memory for.' };
+    const result = addMemory(context.user.id, args.fact);
+    if (result.error) return { text: `Error: ${result.error}` };
+    context.savedMemory = true;
+    return {
+      text: result.duplicate
+        ? 'This was already in memory. Tell the user briefly that you already remember it.'
+        : 'Saved to memory. Confirm briefly to the user that you will remember it.',
+    };
+  }
+
   if (name === 'run_code') {
     const result = await runCode(String(args.code || ''));
-    return { text: result.ok ? result.output : `Error: ${result.error}` };
+    // For a bank, a made-up figure is worse than no figure — after a failed calculation small
+    // models tend to "estimate" the answer anyway, so spell out that they must retry or say so.
+    return {
+      text: result.ok
+        ? result.output
+        : `Error: ${result.error}\nThe calculation did not run, so you do not have a result. Fix the expression ` +
+          '(use ^ for powers) and call run_code again, or tell the user the calculation failed. Never state a ' +
+          'figure you did not get from a successful run_code result.',
+    };
   }
 
   if (name === 'fetch_url') {
@@ -537,7 +580,7 @@ async function executeTool(name, args, context = {}) {
         }
         const insertResult = db
           .prepare(
-            'INSERT INTO documents (user_id, department, filename, mime_type, kind, image_data, char_count) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO documents (user_id, department, is_personal, filename, mime_type, kind, image_data, char_count) VALUES (?, ?, 1, ?, ?, ?, ?, ?)'
           )
           .run(context.user.id, department, filename, result.contentType, 'image', result.buffer.toString('base64'), 0);
         return {
@@ -557,7 +600,7 @@ async function executeTool(name, args, context = {}) {
             const hostname = new URL(result.sourceUrl).hostname;
             const insertResult = db
               .prepare(
-                'INSERT INTO documents (user_id, department, filename, mime_type, kind, char_count) VALUES (?, ?, ?, ?, ?, ?)'
+                'INSERT INTO documents (user_id, department, is_personal, filename, mime_type, kind, char_count) VALUES (?, ?, 1, ?, ?, ?, ?)'
               )
               .run(context.user.id, department, hostname, 'text/html', 'webpage', result.text.length);
             const insertChunk = db.prepare(
@@ -698,13 +741,7 @@ async function executeTool(name, args, context = {}) {
       if (!doc) return { text: `Error: no document with id ${documentId}` };
 
       const user = context.user;
-      const canAccess =
-        user &&
-        (user.role === 'admin' ||
-          doc.user_id === user.id ||
-          doc.department === user.department ||
-          doc.department === BANKWIDE_DEPARTMENT);
-      if (!canAccess) return { text: 'Error: you do not have access to that document' };
+      if (!canAccessDoc(doc, user)) return { text: 'Error: you do not have access to that document' };
 
       if (doc.kind !== 'xlsx') return { text: `Error: "${doc.filename}" is not an Excel spreadsheet` };
       if (!doc.file_data) {

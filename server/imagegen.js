@@ -48,7 +48,7 @@ async function generateImage(prompt, user) {
   const department = user.department || 'General';
   const result = db
     .prepare(
-      'INSERT INTO documents (user_id, department, filename, mime_type, kind, image_data, char_count) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO documents (user_id, department, is_personal, filename, mime_type, kind, image_data, char_count) VALUES (?, ?, 1, ?, ?, ?, ?, ?)'
     )
     .run(user.id, department, filename, 'image/png', 'image', data.image_base64, prompt.length);
 

@@ -50,6 +50,9 @@ async function startTestServer() {
       AMERB_DB_PATH: dbPath,
       PORT: String(port),
       SESSION_SECRET: 'test-secret-not-for-production',
+      // Tests never talk to a model, so don't make every test server load one into memory.
+      AMERB_SKIP_WARMUP: '1',
+      AMERB_SECRET_KEY_PATH: `${dbPath}.key`,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -75,7 +78,7 @@ async function startTestServer() {
     async stop() {
       child.kill();
       await new Promise((resolve) => child.once('exit', resolve));
-      for (const suffix of ['', '-wal', '-shm']) {
+      for (const suffix of ['', '-wal', '-shm', '.key']) {
         fs.rmSync(`${dbPath}${suffix}`, { force: true });
       }
     },
@@ -109,6 +112,13 @@ function makeClient(baseUrl) {
         body: JSON.stringify(body || {}),
       }),
     delete: (pathname) => request(pathname, { method: 'DELETE' }),
+    // Multipart upload: `files` is [{ name, content }], `fields` extra form fields (e.g. scope).
+    upload: (pathname, files, fields = {}) => {
+      const form = new FormData();
+      for (const f of files) form.append('files', new Blob([f.content], { type: 'text/plain' }), f.name);
+      for (const [key, value] of Object.entries(fields)) form.append(key, value);
+      return request(pathname, { method: 'POST', body: form });
+    },
   };
 }
 

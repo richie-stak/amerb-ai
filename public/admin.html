@@ -30,6 +30,7 @@
     <nav class="admin-tabs">
       <button class="admin-tab active" data-tab="users"><span data-icon="users" data-icon-size="15"></span> Users</button>
       <button class="admin-tab" data-tab="models"><span data-icon="cpu" data-icon-size="15"></span> Local LLMs</button>
+      <button class="admin-tab" data-tab="providers"><span data-icon="globe" data-icon-size="15"></span> External AI</button>
       <button class="admin-tab" data-tab="documents"><span data-icon="folder" data-icon-size="15"></span> Knowledge base</button>
       <button class="admin-tab" data-tab="tools"><span data-icon="sliders" data-icon-size="15"></span> Tools</button>
       <button class="admin-tab" data-tab="analytics"><span data-icon="barChart" data-icon-size="15"></span> Analytics</button>
@@ -125,16 +126,63 @@
         <div class="pull-progress hidden" id="house-model-progress"></div>
       </section>
 
+      <!-- External AI providers -->
+      <section class="admin-panel hidden" id="panel-providers">
+        <h2>External AI providers</h2>
+        <p class="admin-panel-hint">
+          Connect a cloud AI service so staff can choose its models in chat alongside the local ones. Local
+          models keep everything on this machine; <strong>an external model sends the staff member's
+          messages, and any knowledge base excerpts used to answer them, to that company's servers</strong>, and
+          usage is billed to the API key's account. Staff see a ☁ mark and a notice whenever one is selected.
+          Only enable the models your bank's data policy allows.
+        </p>
+
+        <h3 class="admin-subheading">Connect a provider</h3>
+        <div class="provider-form">
+          <div class="field">
+            <label for="provider-type">Provider</label>
+            <select id="provider-type"></select>
+          </div>
+          <div class="field">
+            <label for="provider-name">Display name</label>
+            <input type="text" id="provider-name" maxlength="60" placeholder="e.g. DeepSeek">
+          </div>
+          <div class="field">
+            <label for="provider-key">API key</label>
+            <input type="password" id="provider-key" autocomplete="off" placeholder="Paste the key from the provider's console">
+          </div>
+          <div class="field">
+            <label for="provider-base-url">API base URL</label>
+            <input type="text" id="provider-base-url" placeholder="https://api.example.com/v1">
+            <div class="field-hint" id="provider-base-url-hint">Filled in for you — only change it for a self-hosted or regional endpoint.</div>
+          </div>
+          <button class="btn-primary btn-compact" id="provider-connect-btn" type="button">Connect &amp; load models</button>
+        </div>
+
+        <h3 class="admin-subheading">Connected providers</h3>
+        <div id="providers-list"></div>
+      </section>
+
       <!-- Documents -->
       <section class="admin-panel hidden" id="panel-documents">
         <h2>Knowledge base</h2>
-        <p class="admin-panel-hint">Documents uploaded by staff, grouped by department. These are used to answer department-specific questions in chat.</p>
+        <p class="admin-panel-hint">
+          Every document stored in AMERB AI, across all three knowledge bases: <strong>Bank-wide</strong>
+          (every staff member can search it; only admins add to it), <strong>Department</strong> (only that
+          department can search it) and <strong>Personal</strong> (one person's chat attachments and
+          generated files, private to them). Use this view to oversee and clean up storage. To add files, use the
+          <a href="/knowledge.html">Knowledge base page</a>.
+        </p>
+        <div class="admin-doc-toolbar">
+          <select id="documents-filter"></select>
+          <span class="admin-doc-counts" id="documents-counts"></span>
+        </div>
         <div class="admin-table-wrap">
           <table class="admin-table">
             <thead>
               <tr>
                 <th>Filename</th>
-                <th>Department</th>
+                <th>Knowledge base</th>
                 <th>Uploaded by</th>
                 <th>Size</th>
                 <th>Added</th>
