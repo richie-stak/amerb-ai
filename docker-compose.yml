@@ -1,0 +1,178 @@
+# AMERB AI — whole stack in containers:  Node app + Ollama (+ optional image generation).
+#
+#   cp .env.docker.example .env.docker      # then edit it (at least PUBLIC_HOSTNAMES)
+#   docker compose --env-file .env.docker up -d
+#
+# Optional:
+#   --profile imagegen                      also run the Stable Diffusion image service
+#   -f docker-compose.yml -f docker-compose.gpu.yml    give Ollama an NVIDIA GPU
+#
+# Full guide: docs/DOCKER.md
+#
+# NOTE on configuration: values reach the containers ONLY through the `environment:` blocks
+# below, using ${VAR:-default} substitution. No `env_file:` is used on purpose — the project's
+# regular `.env` (for the non-Docker start.bat/start.sh setup) contains OLLAMA_URL=127.0.0.1 and
+# similar values that would break the containers. Compose reads `.env` for ${...} substitution
+# too, but only the variables referenced here are picked up from it.
+
+name: amerb-ai
+
+# Rotate container logs so they cannot fill the disk (docker compose logs still works).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+    max-file: "${DOCKER_LOG_MAX_FILE:-3}"
+
+services:
+  # ---------------------------------------------------------------------------------------
+  # Ollama — runs the language models. Not published on the host: only the other containers
+  # can reach it (the Ollama API has no authentication).
+  # ---------------------------------------------------------------------------------------
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: amerb-ollama
+    restart: unless-stopped
+    environment:
+      # How long a model stays in memory after its last use (default here: 30 minutes).
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      # Simultaneous requests per model. 1 is gentle on CPU-only machines; raise it on a big server.
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      # Models resident at the same time (chat model + embedding model by default).
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-2}
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------------------
+  # ollama-pull — one-shot job: downloads DEFAULT_MODEL and EMBED_MODEL, then exits.
+  # Models are stored in the ollama service's volume; already-present models are skipped.
+  # Re-run any time with:  docker compose run --rm ollama-pull
+  # ---------------------------------------------------------------------------------------
+  ollama-pull:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: amerb-ollama-pull
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-qwen3:4b-instruct}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+    entrypoint: ["/bin/sh", "/docker/pull-models.sh"]
+    volumes:
+      - ./docker/pull-models.sh:/docker/pull-models.sh:ro
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------------------
+  # app — AMERB AI itself (HTTPS on container port 3000).
+  # ---------------------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: amerb-ai:latest
+    container_name: amerb-app
+    # Fixed hostname: server/certs.js regenerates the self-signed certificate whenever
+    # os.hostname() is not in it. A random container-id hostname would do that on every re-create
+    # (and force every browser to trust a new certificate).
+    hostname: amerb-ai
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      # BIND_ADDRESS=127.0.0.1 limits access to this machine (e.g. behind a reverse proxy).
+      - "${BIND_ADDRESS:-0.0.0.0}:${PORT:-3000}:3000"
+    environment:
+      # --- fixed for containers (do not move these into .env.docker) ---
+      HOST: 0.0.0.0
+      PORT: "3000"                      # container-side port; PORT in .env.docker is the HOST side
+      OLLAMA_URL: http://ollama:11434
+      IMAGEGEN_URL: http://imagegen:7861  # only reachable with --profile imagegen
+      LOG_DIR: /app/logs
+      AMERB_DB_PATH: /app/data/amerb-ai.sqlite
+      # --- configurable ---
+      # Empty = generate a random secret once and keep it in the amerb-data volume.
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      PUBLIC_HOSTNAMES: ${PUBLIC_HOSTNAMES:-}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-qwen3:4b-instruct}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_MAX_MB: ${LOG_MAX_MB:-10}
+      LOG_KEEP: ${LOG_KEEP:-5}
+    volumes:
+      - amerb-data:/app/data      # SQLite database, secret.key, generated session secret
+      - amerb-certs:/app/certs    # self-signed HTTPS certificate
+      - amerb-logs:/app/logs      # rotating structured log
+      - amerb-models:/app/node_modules/@xenova/transformers/.cache   # voice-input (Whisper) model cache
+    healthcheck:
+      test: ["CMD", "node", "/app/docker/healthcheck.js"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------------------
+  # imagegen — optional Stable Diffusion Turbo service (CPU). Large build (PyTorch) and a
+  # ~5 GB model download on first start, so it only runs with:  --profile imagegen
+  # Not published on the host: only the app container talks to it (it has no authentication).
+  # ---------------------------------------------------------------------------------------
+  imagegen:
+    profiles: ["imagegen"]
+    build:
+      context: .
+      dockerfile: docker/imagegen.Dockerfile
+    image: amerb-imagegen:latest
+    container_name: amerb-imagegen
+    restart: unless-stopped
+    environment:
+      AMERB_IMAGEGEN_HOST: 0.0.0.0
+      AMERB_IMAGEGEN_PORT: "7861"
+      AMERB_IMAGEGEN_MODEL: ${IMAGEGEN_MODEL:-stabilityai/sd-turbo}
+    volumes:
+      - imagegen-models:/models   # Hugging Face model cache (HF_HOME=/models/huggingface)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7861/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+
+# Fixed names (not prefixed with the project name) so backup/restore commands in docs/DOCKER.md
+# are the same everywhere. Consequence: one AMERB AI stack per Docker host.
+volumes:
+  amerb-data:
+    name: amerb-data
+  amerb-certs:
+    name: amerb-certs
+  amerb-logs:
+    name: amerb-logs
+  amerb-models:
+    name: amerb-models
+  ollama-models:
+    name: ollama-models
+  imagegen-models:
+    name: imagegen-models

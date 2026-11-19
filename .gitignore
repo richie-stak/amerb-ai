@@ -9,3 +9,9 @@ certs.backup*/
 *.log
 __pycache__/
 data/secret.key
+
+# Runtime state created by running the app / the Windows service
+data/knowledge/
+logs/
+daemon/
+.env.docker

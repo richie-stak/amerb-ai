@@ -4,6 +4,8 @@ const db = require('../db');
 const asyncHandler = require('../middleware/asyncHandler');
 const { logAudit } = require('../audit');
 const { DEPARTMENTS } = require('../departments');
+const L = require('../languages');
+const languageSettings = require('../languageSettings');
 
 const router = express.Router();
 
@@ -27,6 +29,7 @@ function publicUser(row) {
     role: row.role,
     department: row.department,
     customInstructions: row.custom_instructions || '',
+    replyLanguage: row.reply_language || null,
   };
 }
 
@@ -171,6 +174,37 @@ router.patch('/me/instructions', (req, res) => {
   db.prepare('UPDATE users SET custom_instructions = ? WHERE id = ?').run(trimmed || null, req.session.userId);
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
   res.json({ user: publicUser(user) });
+});
+
+// Lets a logged-in user choose the language AMERB AI answers them in, independently of everyone
+// else. Refused when an admin has taken the choice away (everyone then follows the bank default), and
+// refused for a language the bank hasn't made available — a language only becomes available once a
+// model has passed its capability test, so saving one that isn't offered yet would just be ignored
+// at answer time.
+router.patch('/me/language', (req, res) => {
+  if (!req.session || !req.session.userId) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  const { language } = req.body || {};
+  if (!L.CHOICES.includes(language)) {
+    return res.status(400).json({ error: 'Choose a valid language' });
+  }
+  if (!languageSettings.choiceAllowed()) {
+    return res.status(403).json({ error: 'Your administrator has fixed the reply language for everyone.' });
+  }
+  if (language !== L.DEFAULT_LANGUAGE && language !== L.AUTO) {
+    if (!languageSettings.isEnabled(language)) {
+      return res.status(400).json({ error: `${L.labelOf(language)} is not available at this bank.` });
+    }
+    if (!languageSettings.approvedModels(language).length && !languageSettings.isOverridden(language)) {
+      return res.status(400).json({
+        error: `${L.labelOf(language)} has not been approved for any model yet. Ask your administrator to run a language test first.`,
+      });
+    }
+  }
+  db.prepare('UPDATE users SET reply_language = ? WHERE id = ?').run(language, req.session.userId);
+  logAudit(req, 'auth.language_changed', { language });
+  res.json({ ok: true, language });
 });
 
 // Lets a logged-in user change their own password, proving they know the current one first —

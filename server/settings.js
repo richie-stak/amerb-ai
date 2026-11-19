@@ -36,4 +36,37 @@ function getHouseModel() {
   }
 }
 
-module.exports = { getSetting, setSetting, isWebSearchEnabled, isSearchRestricted, getHouseModel };
+// When the bank-wide policies and the department files don't answer a question, may AMERB AI look
+// in the administrator-approved websites? On by default; never the open web (see tools.js webSearch).
+function isKbOnlineFallbackEnabled() {
+  return getSetting('kb_online_fallback', 'true') !== 'false';
+}
+
+// Currency rates: an optional tool, off unless an administrator turns it on. Only the currency pair
+// is sent to the rate service — no customer data — and the address can be pointed at the bank's own
+// rate source instead of the public default.
+function isExchangeRateEnabled() {
+  return getSetting('exchange_rate_enabled', 'false') === 'true';
+}
+
+function exchangeRateUrl() {
+  return getSetting('exchange_rate_url', '') || process.env.EXCHANGE_RATE_URL || 'https://open.er-api.com/v6/latest/GHS';
+}
+
+// A self-hosted SearXNG instance is the reliable way to search from inside a bank network: no
+// scraping of a public engine, and no bot-check pages. Set SEARXNG_URL to use it.
+function searxngUrl() {
+  return process.env.SEARXNG_URL || '';
+}
+
+module.exports = {
+  getSetting,
+  setSetting,
+  isWebSearchEnabled,
+  isSearchRestricted,
+  getHouseModel,
+  isKbOnlineFallbackEnabled,
+  isExchangeRateEnabled,
+  exchangeRateUrl,
+  searxngUrl,
+};

@@ -40,6 +40,7 @@
         <a id="workspace-kb-link" href="/knowledge.html"><span data-icon="folder" data-icon-size="15"></span> Knowledge base</a>
         <a id="workspace-admin-link" href="/admin.html" class="hidden"><span data-icon="shield" data-icon-size="15"></span> Admin portal</a>
         <button type="button" id="workspace-instructions-btn"><span data-icon="sliders" data-icon-size="15"></span> Custom instructions</button>
+        <button type="button" id="workspace-language-btn"><span data-icon="globe" data-icon-size="15"></span> Reply language</button>
         <button type="button" id="workspace-prompts-btn"><span data-icon="lightbulb" data-icon-size="15"></span> Saved prompts</button>
         <button type="button" id="workspace-memory-btn"><span data-icon="bookmark" data-icon-size="15"></span> Memory</button>
         <button type="button" id="workspace-compare-btn"><span data-icon="columns" data-icon-size="15"></span> Compare models</button>
@@ -146,6 +147,33 @@
       <div class="modal-footer">
         <button class="modal-btn-secondary" id="settings-modal-cancel" type="button">Cancel</button>
         <button class="modal-btn-primary" id="settings-modal-save" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="language-modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Reply language</h3>
+        <button class="modal-close-btn" id="language-modal-close" type="button"><span data-icon="x" data-icon-size="18"></span></button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-hint">
+          AMERB AI will answer in the language you pick. Bank documents are in English, so figures,
+          official names and quoted policy wording stay exactly as they are written.
+        </p>
+        <div class="language-options" id="language-options" role="radiogroup" aria-label="Reply language"></div>
+        <p class="language-fixed-note hidden" id="language-fixed-note"></p>
+        <p class="modal-hint language-caution">
+          Only languages that have been tested and approved for the model you are using are offered here,
+          so the list can change when you pick a different model. Twi, Ga and French are not yet well
+          supported by small local models: answers can come out garbled. If that happens, answer in English
+          or ask an admin to use a stronger model. A warning appears under any reply that looks unreliable.
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button class="modal-btn-secondary" id="language-modal-cancel" type="button">Cancel</button>
+        <button class="modal-btn-primary" id="language-modal-save" type="button">Save</button>
       </div>
     </div>
   </div>

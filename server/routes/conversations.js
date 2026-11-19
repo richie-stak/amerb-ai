@@ -3,6 +3,8 @@ const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const { generateDocx, generatePdf } = require('../documentGen');
+const { logAudit } = require('../audit');
+const languageQuality = require('../languageQuality');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -67,10 +69,13 @@ router.get('/:id', (req, res) => {
 
   const messages = db
     .prepare(
-      `SELECT id, role, content, attachments, citations, thinking, feedback, alt_group_id, created_at
-       FROM messages WHERE conversation_id = ? AND is_active = 1 ORDER BY id ASC`
+      `SELECT m.id, m.role, m.content, m.attachments, m.citations, m.thinking, m.feedback, m.alt_group_id, m.created_at,
+              m.language, m.language_warning, m.translation_flag, f.category AS feedback_category
+       FROM messages m
+       LEFT JOIN response_feedback f ON f.message_id = m.id AND f.user_id = ?
+       WHERE m.conversation_id = ? AND m.is_active = 1 ORDER BY m.id ASC`
     )
-    .all(convo.id);
+    .all(req.session.userId, convo.id);
 
   const versionIds = new Map();
   const versionCounts = new Map();
@@ -241,6 +246,74 @@ router.patch('/:id/messages/:messageId/feedback', (req, res) => {
   const nextRating = message.feedback === rating ? null : rating;
   db.prepare('UPDATE messages SET feedback = ? WHERE id = ?').run(nextRating, message.id);
   res.json({ ok: true, feedback: nextRating });
+});
+
+// A staff member reporting that a reply translated something wrongly. Language answers are only as
+// good as the model, and staff are the ones who notice a mistranslated term — this puts that in the
+// record (and in the admin portal's usage figures) instead of it being lost in conversation.
+router.patch('/:id/messages/:messageId/translation-flag', (req, res) => {
+  const { flagged } = req.body || {};
+  if (typeof flagged !== 'boolean') {
+    return res.status(400).json({ error: 'flagged must be true or false' });
+  }
+
+  const message = loadOwnedMessage(req.params.id, req.params.messageId, req.session.userId);
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+  if (message.role !== 'assistant') {
+    return res.status(400).json({ error: 'Only replies can be reported' });
+  }
+  if (!message.language || message.language === 'en') {
+    return res.status(400).json({ error: 'This reply is in English — there is no translation to report' });
+  }
+
+  const value = flagged ? 'incorrect' : null;
+  db.prepare('UPDATE messages SET translation_flag = ? WHERE id = ?').run(value, message.id);
+  // Keep the structured feedback table in step, so figures gathered from either endpoint agree.
+  languageQuality.setFeedback({
+    messageId: message.id,
+    conversationId: message.conversation_id,
+    userId: req.session.userId,
+    category: value,
+    language: message.language,
+    model: message.model,
+  });
+  logAudit(req, 'chat.translation_flagged', { messageId: message.id, language: message.language, flagged });
+  res.json({ ok: true, translationFlag: value });
+});
+
+// Staff feedback on a translated reply: was the translation good, wrong, or hard to follow? One
+// verdict per person per reply (changing it replaces it; sending the same one again clears it, like
+// the thumbs up/down). Recorded against the reply, with who, when, the language and the model, so an
+// administrator can tell a model problem from a wording problem.
+router.post('/:id/messages/:messageId/language-feedback', (req, res) => {
+  const { category } = req.body || {};
+  if (category !== null && category !== 'good' && category !== 'incorrect' && category !== 'unclear') {
+    return res.status(400).json({ error: "category must be 'good', 'incorrect', 'unclear' or null" });
+  }
+
+  const message = loadOwnedMessage(req.params.id, req.params.messageId, req.session.userId);
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+  if (message.role !== 'assistant') {
+    return res.status(400).json({ error: 'Only replies can be given feedback' });
+  }
+  if (!message.language || message.language === 'en') {
+    return res.status(400).json({ error: 'This reply is in English — there is no translation to comment on' });
+  }
+
+  const current = languageQuality.feedbackFor(message.id);
+  const next = category === null || category === current ? null : category;
+  languageQuality.setFeedback({
+    messageId: message.id,
+    conversationId: message.conversation_id,
+    userId: req.session.userId,
+    category: next,
+    language: message.language,
+    model: message.model,
+  });
+  // Keep the older flag in step, so a report made here still shows up wherever that column is read.
+  db.prepare('UPDATE messages SET translation_flag = ? WHERE id = ?').run(next === 'incorrect' ? 'incorrect' : null, message.id);
+  logAudit(req, 'chat.language_feedback', { messageId: message.id, language: message.language, category: next });
+  res.json({ ok: true, category: next });
 });
 
 // Edit a user message's text. Every later message in the conversation is deleted too, since

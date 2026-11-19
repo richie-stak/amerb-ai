@@ -3,6 +3,8 @@ const { requireAuth } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const ollama = require('../llm/ollama');
 const { listExternalModels } = require('../llm');
+const db = require('../db');
+const { departmentDefault } = require('../modelRouting');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -33,8 +35,11 @@ router.get('/', asyncHandler(async (req, res) => {
   const wanted = process.env.DEFAULT_MODEL || '';
   const withTag = (n) => (n.includes(':') || n.startsWith('ext/') ? n : `${n}:latest`);
   const configured = wanted && models.find((m) => withTag(m.name) === withTag(wanted));
-  const defaultModel = (configured || localModels.find((m) => m.tools) || models[0])?.name || null;
-  res.json({ models, defaultModel });
+  const globalDefault = (configured || localModels.find((m) => m.tools) || models[0])?.name || null;
+  // An admin can give each department its own starting model (Admin → Model routing).
+  const user = db.prepare('SELECT department FROM users WHERE id = ?').get(req.session.userId);
+  const forDepartment = departmentDefault(user, models.map((m) => m.name));
+  res.json({ models, defaultModel: forDepartment || globalDefault, departmentDefault: Boolean(forDepartment) });
 }));
 
 module.exports = router;

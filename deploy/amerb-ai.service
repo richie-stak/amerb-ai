@@ -1,0 +1,36 @@
+# systemd unit for AMERB AI. Install with:  sudo sh deploy/install-systemd.sh
+# (it fills in @APP_DIR@ and @APP_USER@ below and copies this to /etc/systemd/system/amerb-ai.service)
+[Unit]
+Description=AMERB AI (local chat assistant: Node.js server + optional image service)
+# Start after the network is up and, if Ollama runs as its own systemd service (the official Linux
+# installer creates ollama.service), after Ollama. Wants= on a unit that doesn't exist is ignored, so this is
+# harmless when Ollama is remote or started another way - AMERB AI also keeps retrying Ollama for ~10 minutes.
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+# Never give up restarting after repeated crashes (default start limit would stop it after 5 in 10 s).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@APP_USER@
+WorkingDirectory=@APP_DIR@
+Environment=AMERB_SERVICE=1
+Environment=NODE_ENV=production
+# Optional: put overrides (PORT, LOG_DIR, ...) in the project's .env file, or uncomment:
+#Environment=LOG_DIR=/var/log/amerb-ai
+ExecStart=/usr/bin/env node scripts/launch.js --service
+Restart=always
+RestartSec=5
+# Stop = SIGTERM to launch.js, which stops the server and the image service; anything left in the
+# cgroup (python worker processes etc.) is cleaned up by systemd.
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# stdout/stderr go to the journal (journalctl -u amerb-ai -f); launch.js also writes <project>/logs/service.log.
+SyslogIdentifier=amerb-ai
+# Light hardening that does not interfere with the app (it only writes inside its own folder).
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

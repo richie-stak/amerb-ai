@@ -14,6 +14,16 @@ function requireAuth(req, res, next) {
   next();
 }
 
+// Roles, from most to least privileged:
+//   admin   - changes anything
+//   auditor - read-only access to records and reports (language settings, terminology, audit log,
+//             usage figures); every route that writes refuses them
+//   user    - ordinary staff
+function roleOf(req) {
+  if (!req.session || !req.session.userId) return null;
+  return db.prepare('SELECT role FROM users WHERE id = ?').get(req.session.userId)?.role || null;
+}
+
 function requireAdmin(req, res, next) {
   if (!req.session || !req.session.userId) {
     return res.status(401).json({ error: 'Not authenticated' });
@@ -25,4 +35,17 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-module.exports = { requireAuth, requireAdmin };
+// For reports an auditor is allowed to read but not change. Used on GET only — anything that writes
+// stays behind requireAdmin, so auditing never becomes a way in.
+function requireAdminOrAuditor(req, res, next) {
+  if (!req.session || !req.session.userId) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  const user = db.prepare('SELECT role FROM users WHERE id = ?').get(req.session.userId);
+  if (!user || !['admin', 'auditor'].includes(user.role)) {
+    return res.status(403).json({ error: 'Administrator or auditor access required' });
+  }
+  next();
+}
+
+module.exports = { requireAuth, requireAdmin, requireAdminOrAuditor, roleOf };

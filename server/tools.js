@@ -19,6 +19,27 @@ const MAX_RETURNED_CHARS = 4000;
 const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
+const EXCHANGE_RATE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'exchange_rate',
+    description:
+      'Look up the current exchange rate between two currencies from the rate service the bank has ' +
+      'configured. Use this for "what is the dollar rate", "convert X cedis to dollars" and every other ' +
+      'currency question instead of guessing or saying you have no live data. Returns the rate, the date it ' +
+      'was published and the source, which you must tell the user.',
+    parameters: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', description: 'Currency to convert from, e.g. GHS' },
+        to: { type: 'string', description: 'Currency to convert to, e.g. USD' },
+        amount: { type: 'number', description: 'Optional amount to convert' },
+      },
+      required: ['from', 'to'],
+    },
+  },
+};
+
 const TOOL_DEFS = [
   {
     type: 'function',
@@ -437,6 +458,8 @@ async function fetchUrl(rawUrl, extraAllowed) {
   throw new Error('Too many redirects');
 }
 
+// Overridable so the test suite can serve a stand-in search page instead of the real internet.
+const SEARCH_ENDPOINT = process.env.AMERB_SEARCH_URL || 'https://html.duckduckgo.com/html/';
 const SEARCH_TIMEOUT_MS = 10000;
 const MAX_SEARCH_RESULTS = 5;
 
@@ -444,11 +467,17 @@ const MAX_SEARCH_RESULTS = 5;
 // links are wrapped in a DDG redirect ("/l/?uddg=<encoded target>&rut=...") — extract the real URL.
 // When the admin has turned on restricted search mode, the query is scoped to only the approved
 // domains list via DuckDuckGo's own "site:" operator, rather than searching the open web.
-async function webSearch(query) {
-  const { isSearchRestricted } = require('./settings');
+// `sitesOnly` is the bank-policy fallback (chat.js): search *only* the domains an administrator
+// approved, whatever the bank-wide "restrict search" setting says — never the open web.
+async function webSearch(query, { sitesOnly = false } = {}) {
+  const { isSearchRestricted, searxngUrl } = require('./settings');
   let effectiveQuery = query;
-  if (isSearchRestricted()) {
-    const domains = db.prepare('SELECT domain FROM allowed_domains').all().map((r) => r.domain);
+  // `sitesOnly` is the bank-policy fallback: search *only* the domains an administrator approved,
+  // whatever the bank-wide "restrict search" setting says — never the open web.
+  const restrict = sitesOnly || isSearchRestricted();
+  let domains = [];
+  if (restrict) {
+    domains = db.prepare('SELECT domain FROM allowed_domains').all().map((r) => r.domain);
     if (!domains.length) {
       throw new Error(
         'Restricted search mode is on, but no domains are approved yet — ask an admin to add some in the Tools tab.'
@@ -457,11 +486,16 @@ async function webSearch(query) {
     effectiveQuery = `${query} (${domains.map((d) => `site:${d}`).join(' OR ')})`;
   }
 
+  // A self-hosted SearXNG instance answers with clean JSON and no bot checks — the right backend for
+  // a bank network. When it is configured, every search goes through it.
+  const searx = searxngUrl();
+  if (searx) return searxngSearch(searx, effectiveQuery, domains);
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
   let res;
   try {
-    res = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(effectiveQuery)}`, {
+    res = await fetch(`${SEARCH_ENDPOINT}?q=${encodeURIComponent(effectiveQuery)}`, {
       headers: { 'User-Agent': DEFAULT_USER_AGENT },
       signal: controller.signal,
     });
@@ -470,9 +504,22 @@ async function webSearch(query) {
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) throw new Error(`Search provider responded with status ${res.status}`);
+  // DuckDuckGo (and others) answer HTTP 202 with a bot-check page when they decide a machine is
+  // automated. Reporting "no results" there is misleading: the search never happened.
+  if (res.status !== 200) {
+    throw new Error(
+      `The search provider refused the request (HTTP ${res.status}` +
+        (res.status === 202 ? ', anti-bot check' : '') +
+        '), so web search is not working from this server. An administrator can point SEARXNG_URL at a self-hosted search service.'
+    );
+  }
 
   const html = await res.text();
+  if (!/result__a/.test(html) && /anomaly|captcha|robot|unusual traffic/i.test(html)) {
+    throw new Error(
+      'The search provider returned a bot-check page instead of results, so the search did not happen. An administrator can point SEARXNG_URL at a self-hosted search service.'
+    );
+  }
 
   const links = [];
   const linkRe = /<a rel="nofollow" class="result__a" href="([^"]+)">([\s\S]*?)<\/a>/g;
@@ -497,6 +544,51 @@ async function webSearch(query) {
   }
 
   return links.map((link, i) => ({ ...link, snippet: snippets[i] || '' }));
+}
+
+// Rates barely move within minutes, so a short cache keeps a busy chat from hammering the service.
+const rateCache = new Map();
+const RATE_CACHE_MS = 10 * 60 * 1000;
+
+async function fetchRates(url) {
+  const cached = rateCache.get(url);
+  if (cached && Date.now() - cached.at < RATE_CACHE_MS) return cached.value;
+
+  const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`rate service answered HTTP ${res.status}`);
+  const json = await res.json();
+  // er-api style ({ rates, time_last_update_utc }) and Frankfurter style ({ rates, date }) both work.
+  const rates = json.rates || json.data?.rates;
+  if (!rates || typeof rates !== 'object') throw new Error('the rate service returned no rates');
+  const value = {
+    rates,
+    when: json.time_last_update_utc || json.date || json.time_last_update_unix ? String(json.time_last_update_utc || json.date || '') : '',
+    source: (() => {
+      try {
+        return new URL(url).hostname;
+      } catch {
+        return 'the configured rate service';
+      }
+    })(),
+  };
+  rateCache.set(url, { at: Date.now(), value });
+  return value;
+}
+
+// SearXNG answers { results: [{ title, url, content }] } — no scraping, no bot checks.
+async function searxngSearch(base, query, domains = []) {
+  const url = `${base.replace(/\/$/, '')}/search?q=${encodeURIComponent(query)}&format=json`;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': DEFAULT_USER_AGENT, Accept: 'application/json' },
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`The search service answered HTTP ${res.status} (${base}).`);
+  const data = await res.json();
+  return (data.results || [])
+    .filter((r) => r && r.url && /^https?:\/\//i.test(r.url))
+    .filter((r) => (domains.length ? domains.some((d) => String(r.url).toLowerCase().includes(d.toLowerCase())) : true))
+    .slice(0, MAX_SEARCH_RESULTS)
+    .map((r) => ({ title: String(r.title || r.url), url: r.url, snippet: String(r.content || '') }));
 }
 
 // Returns { text, meta? } — `text` is what gets fed back to the model, `meta` carries extra
@@ -583,6 +675,7 @@ async function executeTool(name, args, context = {}) {
             'INSERT INTO documents (user_id, department, is_personal, filename, mime_type, kind, image_data, char_count) VALUES (?, ?, 1, ?, ?, ?, ?, ?)'
           )
           .run(context.user.id, department, filename, result.contentType, 'image', result.buffer.toString('base64'), 0);
+        require('./knowledgeFolders').mirrorDocumentById(insertResult.lastInsertRowid);
         return {
           text: 'Image fetched successfully and shown to the user. Do not describe it further unless asked; just acknowledge briefly, and do not fabricate any markdown image links yourself.',
           meta: { documentId: insertResult.lastInsertRowid, filename, kind: 'image' },
@@ -603,6 +696,7 @@ async function executeTool(name, args, context = {}) {
                 'INSERT INTO documents (user_id, department, is_personal, filename, mime_type, kind, char_count) VALUES (?, ?, 1, ?, ?, ?, ?)'
               )
               .run(context.user.id, department, hostname, 'text/html', 'webpage', result.text.length);
+            require('./knowledgeFolders').mirrorDocumentById(insertResult.lastInsertRowid);
             const insertChunk = db.prepare(
               'INSERT INTO document_chunks (document_id, chunk_index, content, heading) VALUES (?, ?, ?, ?)'
             );
@@ -619,6 +713,39 @@ async function executeTool(name, args, context = {}) {
       return { text: result.text };
     } catch (err) {
       return { text: `Error: ${err.message}` };
+    }
+  }
+
+  if (name === 'exchange_rate') {
+    const { isExchangeRateEnabled, exchangeRateUrl } = require('./settings');
+    if (!isExchangeRateEnabled()) {
+      return { text: 'Error: Exchange rates are switched off. An admin can enable them in the Tools tab.' };
+    }
+    const from = String(args.from || 'GHS').trim().toUpperCase().slice(0, 4);
+    const to = String(args.to || 'USD').trim().toUpperCase().slice(0, 4);
+    const amount = Number(args.amount);
+    try {
+      const data = await fetchRates(exchangeRateUrl());
+      const rateFrom = data.rates[from];
+      const rateTo = data.rates[to];
+      if (!rateFrom || !rateTo) {
+        return { text: `Error: the rate service does not list ${!rateFrom ? from : to}.` };
+      }
+      // The service quotes everything against one base currency, so the cross-rate is the ratio.
+      const rate = rateTo / rateFrom;
+      const when = data.when ? ` as published ${data.when}` : '';
+      const converted = Number.isFinite(amount) && amount > 0 ? ` ${amount} ${from} = ${(amount * rate).toFixed(2)} ${to}.` : '';
+      return {
+        text:
+          `1 ${from} = ${rate.toFixed(6)} ${to}${when} (source: ${data.source}).${converted} ` +
+          'Tell the user the rate, the publishing date and that it comes from this service; do not present it as an interbank rate unless the source says so.',
+        meta: { exchangeRate: { from, to, rate, when: data.when, source: data.source } },
+      };
+    } catch (err) {
+      return {
+        text:
+          `Error: could not get an exchange rate (${err.message}). Do not guess a rate — tell the user the rate service is unreachable and that an administrator can check it in the Tools tab.`,
+      };
     }
   }
 
@@ -798,4 +925,10 @@ function sanitizeFilename(title) {
   return clean || 'document';
 }
 
-module.exports = { TOOL_DEFS, executeTool, webSearch };
+// The tools to offer a model: the standard set, plus exchange rates when an administrator enabled it.
+function toolDefs() {
+  const { isExchangeRateEnabled } = require('./settings');
+  return isExchangeRateEnabled() ? [...TOOL_DEFS, EXCHANGE_RATE_TOOL] : TOOL_DEFS;
+}
+
+module.exports = { TOOL_DEFS, toolDefs, executeTool, webSearch };

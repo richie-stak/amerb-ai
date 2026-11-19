@@ -40,15 +40,25 @@ async function streamChat({ model, messages, tools, think, maxTokens, signal, on
 }
 
 async function listModels() {
-  const r = await fetch(`${OLLAMA_URL}/api/tags`);
-  if (!r.ok) throw await responseError(r, 'Ollama');
-  const data = await r.json();
-  return (data.models || []).map((m) => ({
-    name: m.name,
-    vision: (m.capabilities || []).includes('vision'),
-    tools: (m.capabilities || []).includes('tools'),
-    thinking: (m.capabilities || []).includes('thinking'),
-  }));
+  // One retry: this is a cheap, idempotent GET, and the connection can be dropped by a keep-alive
+  // socket the server closed a moment earlier ("other side closed") — which used to make the model
+  // picker and the capability-test screen claim the model list was empty for no reason.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await fetch(`${OLLAMA_URL}/api/tags`);
+      if (!r.ok) throw await responseError(r, 'Ollama');
+      const data = await r.json();
+      return (data.models || []).map((m) => ({
+        name: m.name,
+        vision: (m.capabilities || []).includes('vision'),
+        tools: (m.capabilities || []).includes('tools'),
+        thinking: (m.capabilities || []).includes('thinking'),
+      }));
+    } catch (err) {
+      if (attempt >= 1 || !/fetch failed|other side closed|ECONNRESET/i.test(`${err.message} ${err.cause?.code || ''}`)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
 }
 
 module.exports = { streamChat, listModels };

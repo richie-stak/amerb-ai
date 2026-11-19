@@ -33,12 +33,20 @@
       <button class="admin-tab" data-tab="providers"><span data-icon="globe" data-icon-size="15"></span> External AI</button>
       <button class="admin-tab" data-tab="documents"><span data-icon="folder" data-icon-size="15"></span> Knowledge base</button>
       <button class="admin-tab" data-tab="tools"><span data-icon="sliders" data-icon-size="15"></span> Tools</button>
+      <button class="admin-tab" data-tab="language"><span data-icon="globe" data-icon-size="15"></span> Language</button>
       <button class="admin-tab" data-tab="analytics"><span data-icon="barChart" data-icon-size="15"></span> Analytics</button>
+      <button class="admin-tab" data-tab="operations"><span data-icon="cpu" data-icon-size="15"></span> Operations</button>
+      <button class="admin-tab" data-tab="routing"><span data-icon="sliders" data-icon-size="15"></span> Model routing</button>
       <button class="admin-tab" data-tab="audit"><span data-icon="book" data-icon-size="15"></span> Audit log</button>
       <button class="admin-tab" data-tab="system"><span data-icon="database" data-icon-size="15"></span> System</button>
     </nav>
 
     <div class="admin-content">
+      <!-- Shown only for the auditor role. The buttons and inputs are also disabled by admin.js and
+           refused by the server — the banner explains why rather than leaving dead controls unexplained. -->
+      <div class="banner admin-readonly-banner hidden" id="admin-readonly-banner" role="status">
+        <strong>Read-only access</strong> — you can see records and reports but not change anything.
+      </div>
       <div class="banner hidden" id="admin-error"></div>
 
       <!-- Users -->
@@ -194,7 +202,7 @@
             <thead>
               <tr>
                 <th>Filename</th>
-                <th>Knowledge base</th>
+                <th>Folder</th>
                 <th>Uploaded by</th>
                 <th>Size</th>
                 <th>Added</th>
@@ -236,6 +244,33 @@
           approved, search will refuse until you add at least one.
         </p>
 
+        <label class="settings-toggle-row">
+          <input type="checkbox" id="kb-online-fallback-toggle">
+          <span>When the bank's policies don't answer, search the approved websites</span>
+        </label>
+        <p class="admin-panel-hint hint-spaced">
+          Only the domains approved below are searched — never the open web. Staff see which sites were
+          searched under the reply. Requires at least one approved domain.
+        </p>
+
+        <h3 class="admin-subheading">Exchange rates</h3>
+        <label class="settings-toggle-row">
+          <input type="checkbox" id="exchange-rate-toggle">
+          <span>Let AMERB AI look up exchange rates (e.g. "what is the cedi to dollar rate?")</span>
+        </label>
+        <p class="admin-panel-hint hint-spaced">
+          Only the currency pair is sent to the rate service — no customer data, no question text — and the
+          answer always states the rate, the date it was published and where it came from. Off by default.
+          Without it, AMERB AI will not guess a rate.
+        </p>
+        <div class="pull-model-form">
+          <input type="text" id="exchange-rate-url-input" placeholder="https://open.er-api.com/v6/latest/GHS">
+          <button class="btn-compact" id="exchange-rate-url-save" type="button">Save rate address</button>
+        </div>
+        <p class="admin-panel-hint hint-tight">
+          Point this at the bank's own rate source if it has one. The default is a public service that quotes
+          against the cedi.
+        </p>
         <h3 class="admin-subheading">Approved domains for the web fetch tool</h3>
         <div class="pull-model-form">
           <input type="text" id="domain-input" placeholder="e.g. bog.gov.gh">
@@ -254,6 +289,225 @@
               </tr>
             </thead>
             <tbody id="domains-tbody"></tbody>
+          </table>
+        </div>
+
+      </section>
+
+      <!-- Language -->
+      <section class="admin-panel hidden" id="panel-language">
+        <h2>Language</h2>
+        <p class="admin-panel-hint">
+          The language AMERB AI answers in. The app's own interface stays in English, and the bank's
+          documents are in English too — only the language of the answer changes. A language is only
+          offered to staff once the model they are using has passed a real capability test in it.
+        </p>
+        <p class="language-status-note hidden" id="language-status-note" role="status" aria-live="polite"></p>
+
+        <h3 class="admin-subheading">Languages</h3>
+        <div class="language-default-row">
+          <label for="default-language-select">Default reply language for staff</label>
+          <select id="default-language-select"></select>
+          <span class="field-hint">Staff who haven't chosen keep this. English is always the fallback.</span>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Language</th>
+                <th>Enabled</th>
+                <th>Available to staff</th>
+                <th>Approved on</th>
+                <th>Last tested</th>
+              </tr>
+            </thead>
+            <tbody id="language-tbody"></tbody>
+          </table>
+        </div>
+
+        <label class="settings-toggle-row">
+          <input type="checkbox" id="language-choice-toggle">
+          <span>Let staff choose their own reply language (otherwise everyone gets the default)</span>
+        </label>
+        <p class="admin-panel-hint hint-spaced">
+          Offered languages still depend on the model someone picks in chat, so switching model can take a
+          language away again. Anyone whose chosen language stops being available is moved back to the default.
+        </p>
+
+        <label class="settings-toggle-row">
+          <input type="checkbox" id="search-translation-toggle">
+          <span>Translate a local-language question into English for document search only</span>
+        </label>
+        <p class="admin-panel-hint hint-spaced">
+          The knowledge base is in English, so without this a Twi, Ga or French question finds almost
+          nothing. The answer itself is still written in the language the person asked for.
+        </p>
+
+        <label class="settings-toggle-row">
+          <input type="checkbox" id="terminology-approval-toggle">
+          <span>Require approval before a term is given to the AI</span>
+        </label>
+        <p class="admin-panel-hint hint-spaced">
+          When on, new and edited terms stay <strong>pending</strong> and are not sent to the model until an
+          administrator approves them. Rejecting a term removes it from the AI's vocabulary straight away.
+        </p>
+
+        <h3 class="admin-subheading">Capability testing</h3>
+        <p class="admin-panel-hint hint-tight">
+          Producing text in a language is not evidence the model can use it, so a language is offered for a
+          model only after it passes these checks: translation accuracy, comprehension, figures kept intact,
+          consistency across two runs, and readable prose instead of repeated nonsense. A run makes several
+          real model calls and takes minutes on a CPU-only machine — progress is shown below, and you can stop
+          it at any time.
+        </p>
+        <div class="capability-form">
+          <div class="field">
+            <label for="capability-model-select">Model</label>
+            <select id="capability-model-select"></select>
+          </div>
+          <fieldset class="capability-languages">
+            <legend>Languages to test</legend>
+            <div class="capability-language-options" id="capability-language-options"></div>
+          </fieldset>
+          <div class="capability-form-actions">
+            <button class="btn-primary btn-compact" id="capability-run-btn" type="button">Run test</button>
+            <button class="btn-compact" id="capability-stop-btn" type="button" disabled>Stop</button>
+          </div>
+        </div>
+        <p class="admin-panel-hint hint-tight" id="capability-external-note"></p>
+        <p class="admin-panel-hint hint-tight">
+          Testing sends short sample sentences only — no customer information.
+        </p>
+        <div class="capability-progress hidden" id="capability-progress" role="status" aria-live="polite"></div>
+        <div class="capability-results" id="capability-results"></div>
+
+        <h3 class="admin-subheading">Past tests</h3>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Language</th>
+                <th>Result</th>
+                <th>Score</th>
+                <th>Tested at</th>
+                <th>Tested by</th>
+              </tr>
+            </thead>
+            <tbody id="capability-history-tbody"></tbody>
+          </table>
+        </div>
+
+        <h3 class="admin-subheading">Bank wording (terminology)</h3>
+        <p class="admin-panel-hint hint-tight">
+          Documents and products are in English. Record the wording the bank itself uses — AMERB AI is told
+          these terms, and never invents translations on its own. A context note explains how the bank means a
+          term, so the model can choose the right one (e.g. that "loan" excludes staff loans).
+        </p>
+        <div class="terms-toolbar">
+          <div class="field">
+            <label for="terms-language-select">Language</label>
+            <select id="terms-language-select"></select>
+          </div>
+          <div class="field">
+            <label for="terms-search">Search terms</label>
+            <input type="search" id="terms-search" placeholder="Search English term, approved wording or context">
+          </div>
+        </div>
+        <div class="glossary-add-row">
+          <input type="text" id="terms-en-input" maxlength="60" placeholder="English term, e.g. loan" aria-label="English term">
+          <input type="text" id="terms-local-input" maxlength="60" placeholder="Approved wording" aria-label="Approved wording">
+          <input type="text" id="terms-context-input" maxlength="60" placeholder="How the bank means this term — e.g. excludes staff loans" aria-label="Context (optional)">
+          <button class="btn-primary btn-compact" id="terms-add-btn" type="button">Add term</button>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table" id="terms-table">
+            <thead>
+              <tr>
+                <th>Term</th>
+                <th>Approved wording</th>
+                <th>Context</th>
+                <th class="hidden" id="terms-status-th">Status</th>
+                <th>Added by / Edited by</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="terms-tbody"></tbody>
+          </table>
+        </div>
+        <p class="admin-panel-hint hint-tight" id="terms-hint"></p>
+
+        <h3 class="admin-subheading">Usage &amp; quality</h3>
+        <p class="admin-panel-hint hint-tight">
+          How many answers were given in each language, how many were flagged automatically as possibly
+          garbled, and what staff reported: an incorrect translation, or an answer that was hard to understand.
+          Filter by date, language, provider or model to compare them — and use the warnings list below to
+          check whether one model keeps producing the same problem.
+        </p>
+        <div class="analytics-filters" id="language-filters">
+          <label>From <input type="date" id="language-from"></label>
+          <label>To <input type="date" id="language-to"></label>
+          <label>Language <select id="language-filter-language"><option value="">All languages</option></select></label>
+          <label>Provider <select id="language-filter-provider"><option value="">All providers</option></select></label>
+          <label>Model <select id="language-filter-model"><option value="">All models</option></select></label>
+          <button class="btn-primary btn-compact" id="language-stats-apply" type="button">Apply filters</button>
+          <button class="btn-compact" id="language-stats-clear" type="button">Clear filters</button>
+        </div>
+        <p class="admin-panel-hint hint-tight" id="language-stats-range"></p>
+
+        <div class="analytics-stat-cards" id="language-stats"></div>
+
+        <h4 class="admin-minor-heading">Answers by language</h4>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>Language</th><th>Answers</th><th>% of answers</th><th>Garbled</th><th>Incorrect</th><th>Unclear</th><th>Good</th></tr>
+            </thead>
+            <tbody id="language-usage-tbody"></tbody>
+          </table>
+        </div>
+
+        <h4 class="admin-minor-heading">Answers by model</h4>
+        <p class="admin-panel-hint hint-tight">
+          A model with a disproportionate share of flagged answers is the one to investigate: it may need a
+          capability test re-run, or to be withdrawn from the choices staff are offered.
+        </p>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>Model</th><th>Provider</th><th>Answers</th><th>Garbled</th><th>Incorrect</th><th>Unclear</th></tr>
+            </thead>
+            <tbody id="language-model-tbody"></tbody>
+          </table>
+        </div>
+
+        <h4 class="admin-minor-heading">Daily trend</h4>
+        <p class="admin-panel-hint hint-tight" id="language-trend-note">
+          Daily answers; the flagged portion of each bar is emphasised. With no date range chosen, the last
+          14 days are shown.
+        </p>
+        <div class="language-trend" id="language-trend-chart" role="img" aria-label="Daily answers, with flagged answers emphasised"></div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead><tr><th>Date</th><th>Answers</th><th>Garbled</th><th>Incorrect</th></tr></thead>
+            <tbody id="language-trend-tbody"></tbody>
+          </table>
+        </div>
+
+        <h4 class="admin-minor-heading">Investigate warnings</h4>
+        <p class="admin-panel-hint hint-tight">
+          Every quality warning recorded in this period, with the model, the language and a reference to the
+          conversation — so you can tell whether a problem is recurring for one model.
+          <strong>No message text is shown here</strong>, only the references (data protection).
+        </p>
+        <div class="language-events-summary" id="language-events-summary"></div>
+        <div class="language-events-recurring" id="language-events-recurring"></div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>Time</th><th>Language</th><th>Model</th><th>Reason</th><th>Conversation reference</th></tr>
+            </thead>
+            <tbody id="language-events-tbody"></tbody>
           </table>
         </div>
       </section>
@@ -310,6 +564,153 @@
               </table>
             </div>
           </div>
+        </div>
+      </section>
+
+      <!-- Operations -->
+      <section class="admin-panel hidden" id="panel-operations">
+        <h2>Operations</h2>
+        <p class="admin-panel-hint">
+          Live state of this machine and the services AMERB AI depends on — refreshed every 5 seconds while this
+          tab is open. Also available as a public health check at <code>/health</code> (add <code>?deep=1</code> to
+          include Ollama, <code>&amp;strict=1</code> to fail when Ollama is unreachable) for Docker health checks,
+          uptime monitors and the Windows service.
+        </p>
+
+        <div class="analytics-stat-cards" id="operations-cards"></div>
+
+        <div class="analytics-grid">
+          <div class="analytics-block">
+            <h3 class="admin-subheading">Local models in memory (Ollama)</h3>
+            <div class="admin-table-wrap">
+              <table class="admin-table">
+                <thead><tr><th>Model</th><th>Size</th><th>Stays loaded until</th></tr></thead>
+                <tbody id="operations-ollama-tbody"></tbody>
+              </table>
+            </div>
+            <p class="admin-panel-hint hint-tight" id="operations-ollama-note"></p>
+          </div>
+
+          <div class="analytics-block">
+            <h3 class="admin-subheading">Machine</h3>
+            <div class="admin-table-wrap">
+              <table class="admin-table">
+                <tbody id="operations-machine-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="analytics-block">
+            <h3 class="admin-subheading">Model health (since this restart)</h3>
+            <div class="admin-table-wrap">
+              <table class="admin-table">
+                <thead><tr><th>Model</th><th>Answers</th><th>Failures</th><th>Last error</th></tr></thead>
+                <tbody id="operations-modelhealth-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <h3 class="admin-subheading">Waiting line &amp; message limits</h3>
+        <p class="admin-panel-hint hint-tight">
+          Change these without restarting. One local model can only answer a few messages at once; everyone else
+          waits in a first-come line and is shown their place ("you're 3rd in line").
+        </p>
+        <div class="limits-form">
+          <label>Simultaneous answers <input type="number" id="limit-queue-concurrency" min="1" max="32"></label>
+          <label>People allowed to wait <input type="number" id="limit-queue-waiting" min="0" max="1000"></label>
+          <label>Messages one person can have going <input type="number" id="limit-queue-peruser" min="1" max="10"></label>
+          <label>Messages per minute per person <input type="number" id="limit-rate-minute" min="0" max="1000"></label>
+          <label>Messages per hour per person <input type="number" id="limit-rate-hour" min="0" max="100000"></label>
+          <button class="btn-primary btn-compact" id="limits-save-btn" type="button">Save limits</button>
+        </div>
+        <p class="admin-panel-hint hint-tight" id="limits-hint">0 in a "per person" limit means no limit.</p>
+
+        <h3 class="admin-subheading">Recent warnings and errors</h3>
+        <div class="pull-model-form">
+          <select id="logs-level">
+            <option value="error">Errors only</option>
+            <option value="warn" selected>Warnings and errors</option>
+            <option value="info">Everything</option>
+          </select>
+          <input type="search" id="logs-filter" placeholder="Filter text, e.g. a username or model">
+          <button class="btn-compact" id="logs-refresh-btn" type="button">Refresh</button>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead><tr><th>Time</th><th>Level</th><th>What happened</th></tr></thead>
+            <tbody id="logs-tbody"></tbody>
+          </table>
+        </div>
+        <p class="admin-panel-hint hint-tight" id="logs-hint"></p>
+      </section>
+
+      <!-- Model routing -->
+      <section class="admin-panel hidden" id="panel-routing">
+        <h2>Model routing &amp; quality</h2>
+        <p class="admin-panel-hint">
+          Which model people start on, what happens when one fails, and whether the answers are any good — based on
+          the thumbs up/down staff already give under each reply.
+        </p>
+
+        <h3 class="admin-subheading">Default model per department</h3>
+        <p class="admin-panel-hint hint-tight">
+          A starting point only: staff can still pick any model themselves, and their own choice is remembered. Leave
+          a department on "global default" to keep today's behaviour.
+        </p>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead><tr><th>Department</th><th>Default model</th></tr></thead>
+            <tbody id="routing-departments-tbody"></tbody>
+          </table>
+        </div>
+
+        <h3 class="admin-subheading">Fallback when a model fails</h3>
+        <label class="settings-toggle-row">
+          <input type="checkbox" id="fallback-toggle">
+          <span>If the chosen model can't answer (Ollama down, model removed, provider outage), retry on the next model below</span>
+        </label>
+        <p class="admin-panel-hint hint-tight">
+          Tried in order, then the global default (<code id="routing-global-default">—</code>) as a last resort. An
+          answer never switches models halfway through — only when nothing has been written yet. Never add an
+          external model here unless you're happy for a local-model request to fall back to a cloud provider.
+        </p>
+        <div class="pull-model-form">
+          <select id="fallback-add-select"></select>
+          <button class="btn-compact" id="fallback-add-btn" type="button">Add to fallback list</button>
+        </div>
+        <ol class="fallback-list" id="fallback-list"></ol>
+
+        <h3 class="admin-subheading">Answer quality by model</h3>
+        <p class="admin-panel-hint hint-tight">
+          Approval is thumbs up ÷ (up + down). "Confidence" is the statistical lower bound, so a model with one lucky
+          thumbs up doesn't outrank one with ninety out of a hundred. A model is flagged for review below 60% once it
+          has 10 ratings.
+        </p>
+        <div class="pull-model-form">
+          <select id="quality-range">
+            <option value="0">All time</option>
+            <option value="30">Last 30 days</option>
+            <option value="7">Last 7 days</option>
+          </select>
+          <button class="btn-compact" id="quality-refresh-btn" type="button">Refresh</button>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>Model</th><th>Answers</th><th>Ratings</th><th>Approval</th><th>Avg. reply</th><th>Fallback answers</th><th>Verdict</th></tr>
+            </thead>
+            <tbody id="quality-tbody"></tbody>
+          </table>
+        </div>
+        <div id="quality-suggestions"></div>
+
+        <h3 class="admin-subheading">Recent thumbs down</h3>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead><tr><th>When</th><th>Model</th><th>Department</th><th>Question</th><th>Answer</th></tr></thead>
+            <tbody id="quality-downvotes-tbody"></tbody>
+          </table>
         </div>
       </section>
 

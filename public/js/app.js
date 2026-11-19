@@ -17,6 +17,7 @@
   const workspaceMenu = document.getElementById('workspace-menu');
   const workspaceAdminLink = document.getElementById('workspace-admin-link');
   const workspaceInstructionsBtn = document.getElementById('workspace-instructions-btn');
+  const workspaceLanguageBtn = document.getElementById('workspace-language-btn');
   const workspaceThemeBtn = document.getElementById('workspace-theme-btn');
   AmerbTheme.wireThemeToggle(workspaceThemeBtn);
   const logoutBtn = document.getElementById('logout-btn');
@@ -38,6 +39,12 @@
   const settingsModalCancel = document.getElementById('settings-modal-cancel');
   const settingsModalSave = document.getElementById('settings-modal-save');
   const customInstructionsInput = document.getElementById('custom-instructions-input');
+  const languageModalOverlay = document.getElementById('language-modal-overlay');
+  const languageModalClose = document.getElementById('language-modal-close');
+  const languageModalCancel = document.getElementById('language-modal-cancel');
+  const languageModalSave = document.getElementById('language-modal-save');
+  const languageOptions = document.getElementById('language-options');
+  const languageFixedNote = document.getElementById('language-fixed-note');
   const workspacePasswordBtn = document.getElementById('workspace-password-btn');
   const passwordModalOverlay = document.getElementById('password-modal-overlay');
   const passwordModalClose = document.getElementById('password-modal-close');
@@ -225,6 +232,25 @@
     errorBanner.classList.add('hidden');
   }
 
+  // A quiet, non-error status line under the composer (e.g. "model X answered instead").
+  function showNote(html) {
+    let el = document.getElementById('composer-note');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'composer-note';
+      el.className = 'composer-note';
+      composerHint.parentNode.insertBefore(el, composerHint);
+    }
+    el.innerHTML = html;
+    el.classList.remove('hidden');
+    clearTimeout(showNote.timer);
+    showNote.timer = setTimeout(() => el.classList.add('hidden'), 12000);
+  }
+
+  function formatDuration(seconds) {
+    return seconds >= 90 ? `${Math.round(seconds / 60)} min` : `${Math.max(1, Math.round(seconds))} sec`;
+  }
+
   // ---------- Bootstrap ----------
 
   async function bootstrap() {
@@ -243,7 +269,9 @@
     userDept.textContent = meData.user.department || '';
     userAvatar.textContent = meData.user.username.slice(0, 1).toUpperCase();
     customInstructionsInput.value = meData.user.customInstructions || '';
-    if (meData.user.role === 'admin') {
+    // Auditors need the portal too — it is read-only for them, but it is where language records and
+    // reports live.
+    if (meData.user.role === 'admin' || meData.user.role === 'auditor') {
       workspaceAdminLink.classList.remove('hidden');
     }
     renderStarterPrompts(meData.user.department);
@@ -251,6 +279,7 @@
     await loadModels();
     await loadConversations();
     await loadSettings();
+    await loadReplyLanguage();
     maybeShowOnboarding(meData.user.username);
   }
 
@@ -488,6 +517,9 @@
       modelSelect.value = data.conversation.model;
       updateThinkToggle();
     }
+    // The model picker changed programmatically (no change event), so ask again what languages it
+    // supports before the note under the composer can go stale.
+    loadReplyLanguage();
     renderMessages(data.messages);
     renderConversationList();
   }
@@ -512,13 +544,21 @@
     for (const m of messages) {
       appendMessageRow(
         m.role, m.content, m.attachments || [], m.id, m.citations || [], m.thinking || '', m.feedback || null,
-        m.versionIndex, m.versionTotal
+        m.versionIndex, m.versionTotal,
+        // Language quality travels with the stored reply: the warning (or the quiet "not available"
+        // fallback note) must still be there when the conversation is reopened, not only live. The
+        // saved feedback category must survive a reload for the same reason.
+        {
+          language: m.language || null,
+          languageWarning: m.language_warning || null,
+          feedbackCategory: m.feedback_category || null,
+        }
       );
     }
     scrollToBottom(true);
   }
 
-  function appendMessageRow(role, content, attachments, messageId, citations, thinking, feedback, versionIndex, versionTotal) {
+  function appendMessageRow(role, content, attachments, messageId, citations, thinking, feedback, versionIndex, versionTotal, meta = {}) {
     if (emptyState.parentElement) emptyState.remove();
 
     const row = document.createElement('div');
@@ -660,6 +700,28 @@
 
     row.appendChild(contentEl);
     chatInner.appendChild(row);
+
+    // A saved reply can carry a language-quality marker: either the garble warning with its two ways
+    // out, or the quiet "the language wasn't available, this is English" fallback note. Rendered
+    // after the row is assembled so the block can find the content and action elements.
+    if (role === 'assistant' && meta.languageWarning) {
+      if (String(meta.languageWarning).startsWith('unavailable:')) {
+        renderLanguageUnavailableNote(row, {
+          language: String(meta.languageWarning).slice('unavailable:'.length) || meta.language,
+        });
+      } else {
+        renderLanguageWarningBlock(row, { language: meta.language });
+      }
+    }
+
+    // Every reply actually written in another language gets the three-way feedback control, not only
+    // the ones that tripped a warning — a wrong word can look perfectly fluent. A reply that fell back
+    // to English is excluded: there is no translation on it to rate.
+    const fellBackToEnglish = String(meta.languageWarning || '').startsWith('unavailable:');
+    if (role === 'assistant' && meta.language && !fellBackToEnglish) {
+      ensureLanguageFeedback(row, { language: meta.language, category: meta.feedbackCategory || null });
+    }
+
     return { row, contentEl, textEl, toolStatusEl, bubble, thinkingEl, versionSwitcherEl };
   }
 
@@ -717,6 +779,83 @@
       wrap.appendChild(chip);
     }
     return wrap;
+  }
+
+  // ---------- "Not covered by the bank's policies" web-search note ----------
+  //
+  // When none of the bank's policies answer a question, the server may search the administrator-approved
+  // websites and report back which ones it searched. That belongs inside the reply, under the answer and
+  // above the source chips, and it is deliberately quiet — a policy gap is an honest normal outcome, not
+  // an error, so it must never look like the red banner. Older saved replies have no such event at all:
+  // rendering is purely additive, so their rows are unchanged.
+  function safeWebsiteUrl(url) {
+    if (!url) return null;
+    try {
+      const parsed = new URL(String(url));
+      return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Citations arrive on the stream's `done` event, after this note, so while streaming there is no
+  // citations element to sit above yet — the note waits above the action row instead, and the `done`
+  // handler is careful to put the citations below it.
+  function insertNoteAboveCitations(contentEl, note) {
+    const citationsEl = contentEl.querySelector('.citations');
+    if (citationsEl) contentEl.insertBefore(note, citationsEl);
+    else insertMessageFooter(contentEl, note);
+  }
+
+  function renderPolicyWebSearchNote(row, data) {
+    const contentEl = row.querySelector('.message-content');
+    if (!contentEl || !data) return;
+    // Only ever one note per reply, however many times the server reports it.
+    if (contentEl.querySelector('.policy-web-search-note')) return;
+
+    const note = document.createElement('div');
+    note.className = 'policy-web-search-note';
+    note.setAttribute('role', 'note');
+
+    const line = document.createElement('p');
+    line.className = 'policy-web-search-note-line';
+    const lead = document.createElement('strong');
+    lead.textContent = "Not covered by the bank's policies";
+    line.appendChild(lead);
+
+    const error = typeof data.error === 'string' ? data.error.trim() : '';
+    if (error) {
+      // Search could not run: say so quietly, with the server's reason and no result links.
+      line.appendChild(document.createTextNode(` — searching the approved websites failed: ${error}.`));
+    } else {
+      const sites = Array.isArray(data.sites)
+        ? data.sites.map((s) => String(s || '').trim()).filter(Boolean)
+        : [];
+      line.appendChild(document.createTextNode(sites.length ? ` — searched the approved websites: ${sites.join(', ')}.` : ' — searched the approved websites.'));
+    }
+    note.appendChild(line);
+
+    if (!error) {
+      const results = Array.isArray(data.results) ? data.results : [];
+      const list = document.createElement('ol');
+      list.className = 'policy-web-search-note-results';
+      for (const result of results) {
+        const href = safeWebsiteUrl(result && result.url);
+        if (!href) continue;
+        const item = document.createElement('li');
+        const link = document.createElement('a');
+        link.href = href;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        // Titles come from a fetched page, so they are plain text — never markup.
+        link.textContent = result.title ? String(result.title) : href;
+        item.appendChild(link);
+        list.appendChild(item);
+      }
+      if (list.children.length) note.appendChild(list);
+    }
+
+    insertNoteAboveCitations(contentEl, note);
   }
 
   async function copyMessageText(textEl, actions) {
@@ -813,6 +952,10 @@
     if (!res.ok) return;
 
     row.dataset.messageId = target.id;
+    // The versions endpoint returns no language or feedback category, so the previous version's
+    // "Recorded" state must not be left showing against a different version — clear it rather than
+    // misattribute feedback (the next save will record against the version now on screen).
+    setLanguageFeedbackState(row, null);
     setMarkdownContent(textEl, target.content);
     if (thinkingEl) {
       if (target.thinking) {
@@ -825,7 +968,12 @@
     const oldCitations = row.querySelector('.citations');
     if (oldCitations) oldCitations.remove();
     if (target.citations && target.citations.length) {
-      textEl.insertAdjacentElement('afterend', makeCitationsEl(target.citations));
+      const citationsEl = makeCitationsEl(target.citations);
+      // Same rule as when the stream finishes: a "not covered by the bank's policies" note stays
+      // above the source chips when there is one on this reply.
+      const policyNote = row.querySelector('.policy-web-search-note');
+      if (policyNote) policyNote.insertAdjacentElement('afterend', citationsEl);
+      else textEl.insertAdjacentElement('afterend', citationsEl);
     }
     updateVersionSwitcher(versionSwitcherEl, newIndex + 1, versions.length);
   }
@@ -1110,6 +1258,404 @@
       settingsModalSave.disabled = false;
     }
   });
+
+  // ---------- Reply language ----------
+  //
+  // The app's own labels stay in English on purpose — only the model's answers change language, and
+  // a half-translated interface would be worse than none. The server resolves the effective
+  // language (an admin may fix it for everyone), so the radio list is rebuilt from the API every
+  // time the modal opens and nothing about the choice is cached across openings.
+
+  let languageInfo = null; // last GET /api/languages payload, for rendering the modal and the notes
+  let replyLanguage = 'en'; // what this page load's answers will actually be in
+  let languageFetchSeq = 0;
+
+  // Availability is approved per model, so the model the person has picked is always sent along —
+  // a language that passed for one model says nothing about another.
+  async function fetchLanguageInfo() {
+    const model = modelSelect.value;
+    const url = model ? `/api/languages?model=${encodeURIComponent(model)}` : '/api/languages';
+    const res = await fetch(url);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not load language settings');
+    return data;
+  }
+
+  function languageByCode(data, code) {
+    return (data?.languages || []).find((language) => language.code === code) || null;
+  }
+
+  // English is always usable; anything else only while the server says it is available for the
+  // currently selected model (enabled, and approved by a capability test).
+  function languageIsAvailable(data, code) {
+    if (!code) return false;
+    if (code === 'en') return true;
+    return Boolean(languageByCode(data, code)?.available);
+  }
+
+  // The short name a staff member knows the language by, e.g. "Twi" rather than "Twi (Akan)".
+  function languageShortName(code, data = languageInfo) {
+    const language = languageByCode(data, code);
+    const name = language ? language.native || language.label : code;
+    return String(name || '').replace(/\s*\(.*\)$/, '') || code;
+  }
+
+  // Which option the person's next answer will actually use. The server reports the resolved code
+  // as `effective`; older payloads only had `mine`, so fall back through the human-facing fields.
+  function pageReplyLanguage(data) {
+    if (data.choiceAllowed === false) return data.effective || data.defaultLanguage || 'en';
+    return data.mine || data.effective || data.defaultLanguage || 'en';
+  }
+
+  // Fetched during bootstrap and again whenever the model picker changes. Failure is non-fatal:
+  // without the language feature the page behaves exactly as it did before it existed.
+  async function loadReplyLanguage() {
+    const seq = ++languageFetchSeq;
+    try {
+      const data = await fetchLanguageInfo();
+      // A slower, older request must not overwrite the answer for a newer model pick.
+      if (seq !== languageFetchSeq) return;
+      languageInfo = data;
+      replyLanguage = pageReplyLanguage(data);
+      announceReplyLanguage();
+    } catch {
+      if (seq === languageFetchSeq) replyLanguage = 'en';
+    }
+  }
+
+  function clearComposerNote() {
+    const el = document.getElementById('composer-note');
+    if (el) el.classList.add('hidden');
+  }
+
+  // Said quietly under the composer, and only when it changes the answer from English — telling an
+  // English user their replies are in English would be noise. It also explains when the person's
+  // saved choice can't be used for the model they just picked, so the answer doesn't silently
+  // change language.
+  function announceReplyLanguage() {
+    clearComposerNote();
+    if (!languageInfo) return;
+    const data = languageInfo;
+    if (data.choiceUnavailable && data.mine) {
+      const model = data.model || modelSelect.value;
+      showNote(
+        `${escapeHtml(languageShortName(data.mine, data))} isn't available for ${escapeHtml(model)}, so replies will be in English.`
+      );
+      return;
+    }
+    const effective = data.effective || 'en';
+    if (effective === 'en') return;
+    if (effective === 'auto') {
+      showNote('Replies will match the language you write in.');
+      return;
+    }
+    showNote(`Replies will be in ${escapeHtml(languageShortName(effective, data))}.`);
+  }
+
+  // "Twi (Akan) — Twi" and "Ga — Ga" pair the admin-facing name with the name staff know the
+  // language by; English is already its own native name, so there it would just be a duplicate.
+  function languageDisplayName(language) {
+    if (!language) return '';
+    return language.code !== 'en' && language.native ? `${language.label} — ${language.native}` : language.label;
+  }
+
+  function renderLanguageOptions(data) {
+    const fixed = data.choiceAllowed === false;
+    const languages = data.languages || [];
+    // Show what the person will actually get: when their saved choice can't be used for this model,
+    // the server resolves it to the default, so that is what should be selected here.
+    const stored = pageReplyLanguage(data);
+    const selected = languageIsAvailable(data, stored) ? stored : data.effective || data.defaultLanguage || 'en';
+
+    languageOptions.innerHTML = '';
+    for (const language of languages) {
+      const available = languageIsAvailable(data, language.code);
+      const label = document.createElement('label');
+      label.className = `language-option${fixed ? ' is-fixed' : ''}${available ? '' : ' is-unavailable'}`;
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = 'reply-language';
+      input.value = language.code;
+      input.checked = available && language.code === selected;
+      // A disabled radio must not be selectable. Unavailable languages are still shown, with the
+      // server's reason as a hint, so staff can see why Twi isn't there yet instead of silently
+      // wondering where it went.
+      input.disabled = fixed || !available;
+      const text = document.createElement('span');
+      text.className = 'language-option-text';
+      const title = document.createElement('span');
+      title.className = 'language-option-title';
+      title.textContent = languageDisplayName(language);
+      text.appendChild(title);
+      if (!available) {
+        const hint = document.createElement('span');
+        hint.className = 'language-option-hint';
+        hint.textContent = language.reason || 'Not available for this model yet.';
+        text.appendChild(hint);
+      } else if (language.warning) {
+        // Available, but only because an administrator chose to offer it without a passed language
+        // test: say so here rather than letting it look approved.
+        const hint = document.createElement('span');
+        hint.className = 'language-option-hint';
+        hint.textContent = language.warning;
+        text.appendChild(hint);
+      }
+      label.append(input, text);
+      languageOptions.appendChild(label);
+    }
+
+    // "Match my message" only makes sense while at least one other language is available; otherwise
+    // it would be another way of saying English.
+    const anyLanguageAvailable = languages.some((language) => language.code !== 'en' && language.available);
+    if (anyLanguageAvailable) {
+      const label = document.createElement('label');
+      label.className = `language-option${fixed ? ' is-fixed' : ''}`;
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = 'reply-language';
+      input.value = 'auto';
+      input.checked = !fixed && stored === 'auto';
+      input.disabled = fixed;
+      const text = document.createElement('span');
+      text.className = 'language-option-text';
+      const title = document.createElement('span');
+      title.className = 'language-option-title';
+      title.textContent = 'Match my message';
+      const hint = document.createElement('span');
+      hint.className = 'language-option-hint';
+      hint.textContent = 'Reply in the same language the message is written in — English unless it is written in another available language.';
+      text.append(title, hint);
+      label.append(input, text);
+      languageOptions.appendChild(label);
+    }
+
+    languageModalSave.classList.toggle('hidden', fixed);
+    languageModalCancel.textContent = fixed ? 'Close' : 'Cancel';
+    languageFixedNote.classList.toggle('hidden', !fixed);
+    if (fixed) {
+      const language = (data.languages || []).find((l) => l.code === (data.effective || data.defaultLanguage));
+      const name = language ? languageDisplayName(language) : data.defaultLanguage;
+      languageFixedNote.textContent = `Your administrator has fixed the reply language for everyone: ${name}.`;
+    }
+  }
+
+  async function openLanguageModal() {
+    workspaceMenu.classList.add('hidden');
+    languageFixedNote.classList.add('hidden');
+    languageModalSave.classList.remove('hidden');
+    languageModalCancel.textContent = 'Cancel';
+    languageOptions.innerHTML = '<div class="language-options-loading">Loading languages...</div>';
+    languageModalOverlay.classList.remove('hidden');
+    try {
+      renderLanguageOptions(await fetchLanguageInfo());
+    } catch (err) {
+      closeLanguageModal();
+      showBanner(err.message || 'Could not load language settings');
+    }
+  }
+
+  function closeLanguageModal() {
+    languageModalOverlay.classList.add('hidden');
+  }
+
+  async function saveReplyLanguage() {
+    const selected = languageOptions.querySelector('input[name="reply-language"]:checked');
+    if (!selected || selected.disabled) return;
+    languageModalSave.disabled = true;
+    try {
+      const res = await fetch('/api/auth/me/language', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ language: selected.value }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not save your reply language');
+      replyLanguage = data.language || selected.value;
+      closeLanguageModal();
+      // Re-read the resolved state: the choice itself may change what "effective" means, and the
+      // note under the composer should match what the next answer will really be in.
+      await loadReplyLanguage();
+    } catch (err) {
+      // The server refuses politely when an admin has fixed the language — say so where the rest
+      // of this page reports problems, rather than failing silently.
+      showBanner(err.message || 'Could not save your reply language');
+    } finally {
+      languageModalSave.disabled = false;
+    }
+  }
+
+  workspaceLanguageBtn.addEventListener('click', openLanguageModal);
+  languageModalClose.addEventListener('click', closeLanguageModal);
+  languageModalCancel.addEventListener('click', closeLanguageModal);
+  languageModalSave.addEventListener('click', saveReplyLanguage);
+  languageModalOverlay.addEventListener('click', (e) => {
+    if (e.target === languageModalOverlay) closeLanguageModal();
+  });
+
+  // ---------- Language notices under a reply ----------
+  //
+  // A warning about an unreliable local-language answer belongs next to the answer, not only in the
+  // composer note — the person may read the reply long after that note has faded. The block keeps the
+  // single way out that is specific to a garbled answer: re-answer the same question in English.
+
+  // Insert a notice above the reply's action row, so the buttons stay visually attached to the answer.
+  function insertMessageFooter(contentEl, el) {
+    const actions = contentEl.querySelector('.message-actions');
+    contentEl.insertBefore(el, actions || null);
+  }
+
+  function renderLanguageWarningBlock(row, { language } = {}) {
+    const contentEl = row.querySelector('.message-content');
+    if (!contentEl || contentEl.querySelector('.language-warning')) return;
+    const name = languageShortName(language);
+    const block = document.createElement('div');
+    block.className = 'language-warning';
+    const line = document.createElement('div');
+    line.className = 'language-warning-line';
+    line.innerHTML = `${icon('alertTriangle', { size: 14 })}<strong>This answer may be unreliable in ${escapeHtml(name)} — the model may not speak it well.</strong>`;
+    block.appendChild(line);
+
+    const actions = document.createElement('div');
+    actions.className = 'language-warning-actions';
+
+    const englishBtn = document.createElement('button');
+    englishBtn.type = 'button';
+    englishBtn.className = 'language-warning-btn';
+    englishBtn.textContent = 'Answer in English';
+    englishBtn.addEventListener('click', () => answerInEnglish(row));
+    actions.appendChild(englishBtn);
+
+    block.appendChild(actions);
+    insertMessageFooter(contentEl, block);
+  }
+
+  // ---------- Translation feedback (three categories) ----------
+  //
+  // Staff are the bank's only check on translation quality, so the report has to say *how* it failed:
+  // a wrong banking term is a different problem from an answer that is too hard to follow. "Good"
+  // records the share that is fine. One compact control per translated reply, saved on the message.
+  const LANGUAGE_FEEDBACK = [
+    { category: 'good', label: 'Good translation' },
+    { category: 'incorrect', label: 'Incorrect translation' },
+    { category: 'unclear', label: 'Hard to understand' },
+  ];
+
+  function ensureLanguageFeedback(row, { language, category = null } = {}) {
+    if (!language || language === 'en') return;
+    const contentEl = row.querySelector('.message-content');
+    if (!contentEl || contentEl.querySelector('.language-feedback')) return;
+    const block = document.createElement('div');
+    block.className = 'language-feedback';
+    block.dataset.category = category || '';
+    const label = document.createElement('span');
+    label.className = 'language-feedback-label';
+    label.textContent = 'Rate this translation:';
+    block.appendChild(label);
+    for (const item of LANGUAGE_FEEDBACK) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `language-feedback-btn ${item.category}`;
+      btn.dataset.category = item.category;
+      btn.textContent = item.label;
+      btn.setAttribute('aria-pressed', category === item.category ? 'true' : 'false');
+      btn.addEventListener('click', () => sendLanguageFeedback(row, item.category));
+      block.appendChild(btn);
+    }
+    const status = document.createElement('span');
+    status.className = 'language-feedback-status';
+    status.textContent = category ? '✓ Recorded' : '';
+    block.appendChild(status);
+    insertMessageFooter(contentEl, block);
+  }
+
+  // If the requested language turns out not to be available for the model, the answer falls back to
+  // English — and then there is no translation to rate, so the control must go.
+  function removeLanguageFeedback(row) {
+    const block = row.querySelector('.language-feedback');
+    if (block) block.remove();
+  }
+
+  // Reflects the server's saved category, including after a reload (feedback_category on the message).
+  function setLanguageFeedbackState(row, category) {
+    const block = row.querySelector('.language-feedback');
+    if (!block) return;
+    block.dataset.category = category || '';
+    for (const btn of block.querySelectorAll('.language-feedback-btn')) {
+      btn.setAttribute('aria-pressed', block.dataset.category === btn.dataset.category ? 'true' : 'false');
+    }
+    const status = block.querySelector('.language-feedback-status');
+    if (status) status.textContent = category ? '✓ Recorded' : '';
+  }
+
+  async function sendLanguageFeedback(row, category) {
+    const messageId = row.dataset.messageId;
+    if (!currentConversationId || !messageId) {
+      showBanner('This reply is still being saved — please try again in a moment.');
+      return;
+    }
+    const block = row.querySelector('.language-feedback');
+    const current = block ? block.dataset.category : '';
+    // Same toggle pattern as the thumbs: choosing the selected category again clears it.
+    const next = current === category ? null : category;
+    const buttons = block ? [...block.querySelectorAll('.language-feedback-btn')] : [];
+    for (const btn of buttons) btn.disabled = true;
+    try {
+      const res = await fetch(`/api/conversations/${currentConversationId}/messages/${messageId}/language-feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: next }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not save your feedback');
+      setLanguageFeedbackState(row, data.category === undefined ? next : data.category);
+    } catch (err) {
+      showBanner(err.message || 'Could not save your feedback');
+    } finally {
+      for (const btn of buttons) btn.disabled = false;
+    }
+  }
+
+  // The same question, regenerated in English: the server keeps the person's turn and supersedes this
+  // answer, so it is replaced rather than a second reply appearing after it. The saved language
+  // preference is untouched — this is a one-off.
+  async function answerInEnglish(row) {
+    if (isStreaming) return;
+    if (row !== chatInner.lastElementChild) {
+      showBanner('Only the most recent reply can be re-answered in English.');
+      return;
+    }
+    if (!currentConversationId) {
+      showBanner('This reply is still being saved — please try again in a moment.');
+      return;
+    }
+    row.remove();
+    await streamAssistant('/api/chat/regenerate', {
+      conversationId: currentConversationId,
+      model: modelSelect.value,
+      languageOverride: 'en',
+    });
+  }
+
+  // The chosen language wasn't available for this model, so the answer is in English. A quiet single
+  // line plus the way back to the picker — this is the honest fallback, not an error.
+  function renderLanguageUnavailableNote(row, { language, reason } = {}) {
+    const contentEl = row.querySelector('.message-content');
+    if (!contentEl || contentEl.querySelector('.language-unavailable-note')) return;
+    const note = document.createElement('div');
+    note.className = 'language-unavailable-note';
+    const text = document.createElement('span');
+    const parts = [`${languageShortName(language)} isn't available for this model yet, so this answer is in English.`];
+    if (reason) parts.push(reason);
+    text.textContent = parts.join(' ');
+    note.appendChild(text);
+    const link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'link-btn';
+    link.textContent = 'Choose a language';
+    link.addEventListener('click', openLanguageModal);
+    note.appendChild(link);
+    insertMessageFooter(contentEl, note);
+  }
 
   // ---------- Change password ----------
 
@@ -1857,6 +2403,8 @@
     if (e.key === 'Escape') {
       if (!settingsModalOverlay.classList.contains('hidden')) {
         closeSettingsModal();
+      } else if (!languageModalOverlay.classList.contains('hidden')) {
+        closeLanguageModal();
       } else if (!passwordModalOverlay.classList.contains('hidden')) {
         closePasswordModal();
       } else if (!compareModalOverlay.classList.contains('hidden')) {
@@ -1917,6 +2465,9 @@
       /* storage blocked — the pick just won't be remembered */
     }
     updateThinkToggle();
+    // Languages are approved per model, so the reply-language note and the modal's list must follow
+    // the picker: a language Twi-ready on one model may not be on another.
+    loadReplyLanguage();
   });
 
   async function sendMessage() {
@@ -2042,6 +2593,11 @@
               });
               renderConversationList();
             }
+            // The language the answer is actually being written in, kept for the warning text.
+            if (data.language) assistantRow.dataset.language = data.language;
+            // Offer the three-way feedback while the reply streams too; it only becomes clickable
+            // once the message is saved (a message id is needed), which the handler checks.
+            if (data.language) ensureLanguageFeedback(assistantRow, { language: data.language });
             if (userRow && data.userMessageId) {
               userRow.dataset.messageId = data.userMessageId;
             }
@@ -2049,6 +2605,10 @@
               showBanner(`"${model}" can't see images directly, but any OCR'd text from the attachment is still available to it.`);
             }
             pendingCitations = data.citations || [];
+          } else if (eventName === 'policy-web-search') {
+            // The answer wasn't in the bank's policies, so the approved websites were searched instead.
+            // The reply itself says which sites were searched and links any hits — not a banner.
+            renderPolicyWebSearchNote(assistantRow, data);
           } else if (eventName === 'thinking') {
             if (firstThinkingToken) {
               thinkingEl.classList.remove('hidden');
@@ -2057,6 +2617,42 @@
             thinkingAccumulated += data.delta;
             thinkingEl.querySelector('.thinking-text').textContent = thinkingAccumulated;
             scrollToBottom();
+          } else if (eventName === 'queue') {
+            // Waiting for the local model: one machine can only answer a few messages at once, so
+            // the browser is told where this message stands in the line instead of just freezing.
+            toolStatusEl.classList.remove('hidden', 'done');
+            if (data.state === 'waiting') {
+              const place = data.position === 1 ? 'next' : `#${data.position}`;
+              const soon = data.etaSeconds ? `, about ${formatDuration(data.etaSeconds)}` : '';
+              toolStatusEl.innerHTML = `<span class="typing-dot"></span> Waiting — you're ${escapeHtml(place)} in line${escapeHtml(soon)}`;
+            } else {
+              toolStatusEl.innerHTML = '<span class="typing-dot"></span> Your turn — the model is starting';
+            }
+          } else if (eventName === 'language-unavailable') {
+            // The chosen language couldn't be used for this model, so the answer is coming in
+            // English: say so inside the reply rather than letting it look like a broken translation.
+            removeLanguageFeedback(assistantRow);
+            renderLanguageUnavailableNote(assistantRow, { language: data.language, reason: data.reason });
+          } else if (eventName === 'web-search-result') {
+            // a search that returned nothing, or that the provider refused: say so under the reply,
+            // so an answer that says "I have no live data" is explained rather than mysterious.
+            const sites = Array.isArray(data.sites) && data.sites.length ? ` (approved websites: ${data.sites.join(', ')})` : '';
+            const reason = data.error ? escapeHtml(String(data.error)) : 'no results were found';
+            showNote(`<strong>Searched the web</strong>${escapeHtml(sites)} — ${reason}.`);
+          } else if (eventName === 'language-warning') {
+            // The answer was requested in a local language but reads as nonsense, or came back in
+            // English. Warn inside the reply itself, with the two ways out, rather than in a note
+            // under the composer that fades after a few seconds.
+            renderLanguageWarningBlock(assistantRow, { language: data.language });
+          } else if (eventName === 'fallback') {
+            // The chosen model failed, so another one answered. Say so, quietly, rather than
+            // showing an error for something that worked.
+            showNote(
+              data.external
+                ? `${escapeHtml(data.from)} couldn't answer, so ${escapeHtml(data.to)} did. Note: that model runs outside this machine.`
+                : `${escapeHtml(data.from)} couldn't answer, so ${escapeHtml(data.to)} answered instead.`
+            );
+            toolStatusEl.classList.add('hidden');
           } else if (eventName === 'tool') {
             const label = TOOL_LABELS[data.name] || data.name;
             toolStatusEl.classList.remove('hidden');
@@ -2104,7 +2700,12 @@
           } else if (eventName === 'done') {
             if (data.messageId) assistantRow.dataset.messageId = data.messageId;
             if (pendingCitations.length) {
-              assistantContentEl.insertAdjacentElement('afterend', makeCitationsEl(pendingCitations));
+              const citationsEl = makeCitationsEl(pendingCitations);
+              // The policy web-search note (when present) must stay above the source chips, so the
+              // citations go under it rather than straight under the answer text.
+              const policyNote = assistantContentEl.parentElement.querySelector('.policy-web-search-note');
+              if (policyNote) policyNote.insertAdjacentElement('afterend', citationsEl);
+              else assistantContentEl.insertAdjacentElement('afterend', citationsEl);
             }
             if (data.versionInfo) {
               updateVersionSwitcher(versionSwitcherEl, data.versionInfo.index, data.versionInfo.total);

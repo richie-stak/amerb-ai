@@ -26,8 +26,11 @@ const QUERY_NOISE = new Set([
 const COMMON_TERM_SHARE = 0.5;
 const COMMON_TERM_MIN_DOCS = 4;
 
+// Unicode letters, not just a-z: staff write in Twi and Ga too ("sɛ", "wɔ", "kɛha"), and matching
+// only ASCII used to drop those words entirely. English terms in a mixed Twi/English question still
+// match the (English) knowledge base, which is the point.
 function tokenize(text) {
-  return (text.toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((w) => !STOPWORDS.has(w));
+  return (text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []).filter((w) => !STOPWORDS.has(w));
 }
 
 // Full content of explicitly attached documents (user picked these via the attach button).

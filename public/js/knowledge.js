@@ -3,6 +3,8 @@
 //   Bank-wide   every staff member can read; only admins add or remove files
 //   Department  shared with one department only; any member can add files
 //   My files    a person's own chat attachments and generated documents, private to them
+// Each base is presented as a folder — its name, the on-disk folder it is kept in, how many files it
+// holds, and who may add to it — so it is obvious at a glance which of the three you are looking at.
 (function () {
   AmerbTheme.wireThemeToggle(document.getElementById('theme-toggle-btn'));
 
@@ -15,6 +17,12 @@
   const personalList = document.getElementById('kb-personal-list');
   const departmentTitle = document.getElementById('kb-department-title');
   const departmentHint = document.getElementById('kb-department-hint');
+  const departmentFolder = document.getElementById('kb-department-folder');
+  const departmentCount = document.getElementById('kb-department-count');
+  const globalCount = document.getElementById('kb-global-count');
+  const personalCount = document.getElementById('kb-personal-count');
+  const globalStaffNote = document.getElementById('kb-global-staff-note');
+  const globalFolderNote = document.getElementById('kb-global-folder-note');
   const deptFilter = document.getElementById('kb-department-filter');
   const noDepartment = document.getElementById('kb-no-department');
   const uploadGlobalBtn = document.getElementById('kb-upload-global-btn');
@@ -64,6 +72,8 @@
 
     if (isAdmin()) {
       uploadGlobalBtn.classList.remove('hidden');
+      // Admins also get told where the copy lives, since the folders are theirs to open in Explorer.
+      globalFolderNote.classList.remove('hidden');
       deptFilter.classList.remove('hidden');
       const { departments } = await fetch('/api/auth/departments').then((r) => r.json());
       deptFilter.innerHTML = '<option value="">All departments</option>';
@@ -75,9 +85,14 @@
       }
       if (currentUser.department) deptFilter.value = currentUser.department;
       deptFilter.addEventListener('change', render);
-    } else if (!currentUser.department) {
-      noDepartment.classList.remove('hidden');
-      uploadDepartmentBtn.disabled = true;
+    } else {
+      // Every staff member reads the bank's policies but only an administrator adds them. The note
+      // sits where the upload button would be, so the rule is clear rather than the button just missing.
+      globalStaffNote.classList.remove('hidden');
+      if (!currentUser.department) {
+        noDepartment.classList.remove('hidden');
+        uploadDepartmentBtn.disabled = true;
+      }
     }
 
     uploadGlobalBtn.addEventListener('click', () => pickFiles({ scope: 'global' }));
@@ -118,22 +133,36 @@
     return !q || doc.filename.toLowerCase().includes(q) || (doc.uploaded_by || '').toLowerCase().includes(q);
   }
 
+  function countLabel(n, singular, plural) {
+    return `${n.toLocaleString()} ${n === 1 ? singular : plural}`;
+  }
+
   function render() {
     const docs = allDocuments.filter(matchesSearch);
 
+    // The counts are folder totals, taken from the unfiltered list: the badge says how much the folder
+    // holds, while filtering only narrows which rows are shown. "12 policies" is the size of the bank's
+    // policy folder, not the number of search hits.
+    globalCount.textContent = countLabel(allDocuments.filter((d) => d.scope === 'global').length, 'policy', 'policies');
     renderList(globalList, docs.filter((d) => d.scope === 'global'), 'No bank-wide documents yet.' + (isAdmin() ? ' Add policies here for all staff.' : ''));
 
     // Department section: staff see their own department; admins pick one (or all) from the list.
     const deptFilterValue = isAdmin() ? deptFilter.value : currentUser.department;
     const departmentDocs = docs.filter((d) => d.scope === 'department' && (!deptFilterValue || d.department === deptFilterValue));
+    const departmentTotal = allDocuments.filter((d) => d.scope === 'department' && (!deptFilterValue || d.department === deptFilterValue)).length;
+    departmentCount.textContent = countLabel(departmentTotal, 'file', 'files');
     if (isAdmin()) {
-      departmentTitle.textContent = deptFilterValue ? `${deptFilterValue} department` : 'All departments';
+      departmentTitle.textContent = deptFilterValue ? `${deptFilterValue} department folder` : 'All department folders';
+      // Staff know the base by the department's own name; the server adds its own prefix to the
+      // actual folder on disk.
+      departmentFolder.textContent = deptFilterValue || 'All departments';
       departmentHint.textContent = deptFilterValue
         ? `Shared with everyone in ${deptFilterValue}, and only them. As an admin you can manage every department.`
         : 'Each department sees only its own files. Pick a department to add files to it.';
       uploadDepartmentBtn.innerHTML = `${icon('upload', { size: 14 })} ${deptFilterValue ? `Add to ${escapeHtml(deptFilterValue)}` : 'Add files'}`;
     } else {
-      departmentTitle.textContent = currentUser.department ? `${currentUser.department} department` : 'Department';
+      departmentTitle.textContent = currentUser.department ? `${currentUser.department} department folder` : 'Department folder';
+      departmentFolder.textContent = currentUser.department || 'No department';
       departmentHint.textContent = currentUser.department
         ? `Shared with everyone in ${currentUser.department}, and only them. Anyone in the department can add files.`
         : '';
@@ -147,6 +176,8 @@
     );
 
     const personalDocs = docs.filter((d) => d.scope === 'personal' && d.user_id === currentUser.id);
+    const personalTotal = allDocuments.filter((d) => d.scope === 'personal' && d.user_id === currentUser.id).length;
+    personalCount.textContent = countLabel(personalTotal, 'file', 'files');
     renderList(personalList, personalDocs, 'Nothing yet — files you attach in a chat will appear here.');
   }
 

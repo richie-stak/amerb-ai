@@ -1,0 +1,34 @@
+# Allow-list: nothing enters a build context unless it is named here. This keeps secrets
+# (.env, certs/, data/, secret.key) and machine-specific folders (node_modules, imagegen/venv,
+# .git, logs) out of every image, now and for files added later.
+# Used by BOTH images (the app: ./Dockerfile, the image service: docker/imagegen.Dockerfile).
+*
+
+# --- app image ---
+!package.json
+!package-lock.json
+!eng.traineddata
+!server/
+!public/
+
+# --- helper scripts + image-service sources ---
+!docker/
+!imagegen/
+
+# Re-exclude machine-specific / sensitive content that lives inside the allowed folders.
+imagegen/venv/
+imagegen/__pycache__/
+imagegen/setup.*
+imagegen/start.*
+**/__pycache__/
+**/node_modules/
+**/*.log
+**/*.sqlite
+**/*.sqlite-*
+**/*.db
+**/secret.key
+**/*.pem
+**/.env
+**/.env.*
+**/.DS_Store
+**/Thumbs.db

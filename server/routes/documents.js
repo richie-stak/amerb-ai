@@ -6,6 +6,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { extractText, chunkText, isImageFile, imageMimeType } = require('../documentExtract');
 const { BANKWIDE_DEPARTMENT, DEPARTMENTS } = require('../departments');
 const { SCOPES, scopeOf, canAccessDoc, canDeleteDoc, searchableWhere } = require('../documentAccess');
+const knowledgeFolders = require('../knowledgeFolders');
 const { indexPendingChunks } = require('../embeddings');
 const { logAudit } = require('../audit');
 
@@ -44,7 +45,14 @@ const DOC_COLUMNS = `d.id, d.user_id, d.filename, d.department, d.is_personal, d
   d.created_at, u.username AS uploaded_by`;
 
 function withScope(doc) {
-  return { ...doc, scope: scopeOf(doc) };
+  // The folder the document lives in, by name: what the Knowledge base page and the admin list show,
+  // and the same name as the folder on disk (see server/knowledgeFolders.js).
+  let folder = doc.department === BANKWIDE_DEPARTMENT ? 'Bank-wide' : `Department - ${doc.department}`;
+  if (doc.is_personal) {
+    const owner = doc.user_id ? db.prepare('SELECT username FROM users WHERE id = ?').get(doc.user_id) : null;
+    folder = `Personal - ${owner ? owner.username : `user ${doc.user_id}`}`;
+  }
+  return { ...doc, scope: scopeOf(doc), folder };
 }
 
 // List documents visible to the current user: bank-wide, their department's shared files, and
@@ -168,6 +176,10 @@ router.post('/', upload.array('files', 5), asyncHandler(async (req, res) => {
         );
         chunks.forEach((chunk, idx) => insertChunk.run(docResult.lastInsertRowid, idx, chunk.text, chunk.heading));
       }
+
+      // Copy it into the knowledge-base folder on disk straight away, so a folder an administrator
+      // opens in Explorer matches what was just uploaded.
+      knowledgeFolders.mirrorDocumentById(docResult.lastInsertRowid);
 
       results.push({
         id: docResult.lastInsertRowid,
@@ -297,6 +309,8 @@ router.delete('/:id', (req, res) => {
     return res.status(403).json({ error: reason });
   }
 
+  // Remove the folder copy while its path is still known, then the row.
+  knowledgeFolders.removeDocumentCopy(doc);
   db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
   logAudit(req, 'document.delete', { documentId: doc.id, filename: doc.filename, scope: scopeOf(doc), department: doc.department }, user);
   res.json({ ok: true });
@@ -317,11 +331,14 @@ router.patch('/:id/share', (req, res) => {
   if (scope === 'global') {
     if (user.role !== 'admin') return res.status(403).json({ error: 'Only an admin can publish documents bank-wide.' });
     db.prepare('UPDATE documents SET is_personal = 0, department = ? WHERE id = ?').run(BANKWIDE_DEPARTMENT, doc.id);
+    // It belongs to a different folder now: move the copy rather than leave it behind.
+    knowledgeFolders.mirrorDocumentById(doc.id);
   } else if (scope === 'department') {
     const owner = db.prepare('SELECT department FROM users WHERE id = ?').get(doc.user_id);
     const department = owner?.department;
     if (!department) return res.status(400).json({ error: 'This file\'s owner has no department to share it with.' });
     db.prepare('UPDATE documents SET is_personal = 0, department = ? WHERE id = ?').run(department, doc.id);
+    knowledgeFolders.mirrorDocumentById(doc.id);
   } else {
     return res.status(400).json({ error: 'scope must be "department" or "global"' });
   }

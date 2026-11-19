@@ -1,5 +1,6 @@
 const db = require('./db');
 const { chunkText } = require('./documentExtract');
+const knowledgeFolders = require('./knowledgeFolders');
 
 const MIME_TYPES = {
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -28,6 +29,9 @@ function saveGeneratedFile(buffer, filename, kind, user, searchableText = '') {
     );
     chunks.forEach((chunk, idx) => insertChunk.run(result.lastInsertRowid, idx, chunk.text, chunk.heading));
   }
+
+  // Keep the "My files" folder in step with what the AI produced for this person.
+  knowledgeFolders.mirrorDocumentById(result.lastInsertRowid);
 
   return { documentId: result.lastInsertRowid, filename };
 }

@@ -1,0 +1,17 @@
+# Optional override: give the Ollama container an NVIDIA GPU.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --env-file .env.docker up -d
+#
+# Requires an NVIDIA GPU, a current NVIDIA driver on the host and the NVIDIA Container Toolkit
+# (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+# Check with:  docker run --rm --gpus all ubuntu nvidia-smi
+# Only Ollama uses the GPU. The image service is a CPU-only PyTorch build.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

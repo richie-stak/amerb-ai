@@ -3,11 +3,19 @@ const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const { getExplicitContext, getHybridContext } = require('../retrieval');
-const { TOOL_DEFS, executeTool, webSearch } = require('../tools');
-const { isWebSearchEnabled, getHouseModel } = require('../settings');
+const { TOOL_DEFS, toolDefs, executeTool, webSearch } = require('../tools');
+const { isWebSearchEnabled, getHouseModel, isKbOnlineFallbackEnabled, isExchangeRateEnabled } = require('../settings');
+const { isSearchRestricted } = require('../settings');
 const { addMemory, memoryPrompt } = require('../memory');
 const llm = require('../llm');
 const { logAudit } = require('../audit');
+const queue = require('../queue');
+const rateLimit = require('../rateLimit');
+const modelRouting = require('../modelRouting');
+const L = require('../languages');
+const languageSettings = require('../languageSettings');
+const languageQuality = require('../languageQuality');
+const logger = require('../logger');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -16,6 +24,7 @@ const MAX_TOOL_ROUNDS = 4;
 // Room left in the context window for the model's own reply, and for the tool schemas it's offered.
 const REPLY_RESERVE_TOKENS = 2048;
 const TOOL_DEFS_TOKENS = Math.ceil(JSON.stringify(TOOL_DEFS).length / 3.5);
+// The exchange-rate tool is only offered when an administrator has switched it on.
 
 // A rough token estimate (~3.5 characters per token for English) — close enough to budget a
 // context window without shipping a tokenizer for every model.
@@ -75,12 +84,14 @@ function makeTitle(content) {
 // the same way ChatGPT/Claude replace "New chat" with something legible shortly after you send
 // the first message. Best-effort: a slow or malformed reply just leaves the original truncated-
 // message title in place, so failures here are silent by design.
-async function generateTitle(model, userContent, assistantContent, capabilities) {
+async function generateTitle(model, userContent, assistantContent, capabilities, language) {
   const prompt =
     'Reply with ONLY a short title (3-6 words, no quotes, no punctuation at the end) that summarizes ' +
     "this exchange. Nothing else — not even a lead-in phrase.\n\n" +
     `User: ${userContent.slice(0, 500)}\n` +
-    `Assistant: ${assistantContent.slice(0, 500)}`;
+    `Assistant: ${assistantContent.slice(0, 500)}` +
+    // A chat about a Twi answer is easier to find later if its title is in Twi too.
+    (language && language !== 'en' ? `\n\nWrite the title in the same language as the assistant's reply.` : '');
   try {
     const reply = await llm.completeChat(model, {
       messages: [{ role: 'user', content: prompt }],
@@ -107,12 +118,159 @@ function normalizeModelName(name) {
   return name.includes(':') ? name : `${name}:latest`;
 }
 
+// Which language this answer should be in, and whether the model in front of the person is actually
+// allowed to answer in it.
+//
+// A language is only usable when the bank has enabled it AND that model has passed a capability test
+// in it (server/languageTests.js). When it isn't, the answer is given in English — never in a
+// language the bank hasn't approved — and the browser is told why, so staff see an explanation
+// rather than a surprise. `override` is the "answer in English instead" button: it applies to this
+// turn only and does not change the person's saved preference.
+function resolveAnswerLanguage(user, text, model, override) {
+  // A language is usable when the bank has it on AND this model is either approved for it or an
+  // administrator has explicitly overridden that.
+  const available = (code) => languageSettings.usableForModel(code, model);
+
+  if (override && L.CODES.includes(override) && override !== L.DEFAULT_LANGUAGE) {
+    return available(override) ? { code: override, mode: 'override' } : { code: L.DEFAULT_LANGUAGE, mode: 'unavailable', wanted: override };
+  }
+  if (override === L.DEFAULT_LANGUAGE) return { code: L.DEFAULT_LANGUAGE, mode: 'override' };
+
+  const allowed = languageSettings.choiceAllowed();
+  const stored = user.reply_language || null;
+  const bankDefault = languageSettings.defaultLanguage();
+
+  if (allowed && stored === L.AUTO) {
+    const detected = L.detectLanguage(text, bankDefault);
+    if (!detected) return { code: L.DEFAULT_LANGUAGE, mode: 'english' };
+    return available(detected)
+      ? { code: detected, mode: 'detected' }
+      : { code: L.DEFAULT_LANGUAGE, mode: 'unavailable', wanted: detected };
+  }
+  if (allowed && stored && L.CODES.includes(stored)) {
+    if (stored === L.DEFAULT_LANGUAGE) return { code: L.DEFAULT_LANGUAGE, mode: 'chosen' };
+    return available(stored) ? { code: stored, mode: 'chosen' } : { code: L.DEFAULT_LANGUAGE, mode: 'unavailable', wanted: stored };
+  }
+  // No saved choice (or staff may not choose): the bank default, if the bank may use it for this model.
+  if (bankDefault === L.DEFAULT_LANGUAGE) return { code: L.DEFAULT_LANGUAGE, mode: allowed ? 'default' : 'admin' };
+  return available(bankDefault)
+    ? { code: bankDefault, mode: allowed ? 'default' : 'admin' }
+    : { code: L.DEFAULT_LANGUAGE, mode: 'unavailable', wanted: bankDefault };
+}
+
+// A staff-facing explanation of why the requested language wasn't used.
+const UNAVAILABLE_REASONS = {
+  disabled: 'Your administrator has not enabled it',
+  unapproved: (model) => `It has not been approved for ${model} yet — an administrator has to test it first`,
+};
+
+function unavailableReason(code, model) {
+  return languageSettings.isEnabled(code)
+    ? UNAVAILABLE_REASONS.unapproved(model)
+    : UNAVAILABLE_REASONS.disabled;
+}
+
+// The text the knowledge base is searched with. A Twi, Ga or French question is searched in English,
+// because that is what the bank's documents and the embedding model are in — first by swapping in
+// the English side of any approved term it uses, then (if an admin allows it) by asking the model to
+// translate the question once, for search only. The translation is best-effort: if the model is slow
+// or unavailable, the question is searched as written rather than failing the whole turn.
+async function searchQueryFor(model, capabilities, text, language, glossaryTerms) {
+  const expanded = L.expandQuery(text, language.code, glossaryTerms);
+  if (language.code === 'en' || !languageSettings.searchTranslationEnabled()) return expanded;
+  // Someone who chose Twi but wrote in English needs no help finding English documents.
+  if (!L.detectLanguage(text, language.code)) return expanded;
+  try {
+    const reply = await llm.completeChat(model, {
+      messages: [{ role: 'user', content: L.translationPrompt(text) }],
+      ...(capabilities.thinking ? { think: false } : {}),
+      maxTokens: 120,
+      signal: AbortSignal.timeout(8000),
+    });
+    const translated = (reply.content || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^["'\s]+|["'\s]+$/g, '').trim();
+    if (!translated || translated.length > 600) return expanded;
+    logger.debug('Searched documents in English for a local-language question', { language: language.code });
+    return `${expanded}\n${translated}`;
+  } catch {
+    return expanded;
+  }
+}
+
+// A question that is worth looking outside the bank's own documents for. Greetings, thanks and
+// one-word follow-ups are not: answering "hello" with a web search of bog.gov.gh would be absurd.
+const POLICY_QUESTION = /\b(policy|policies|procedure|guideline|rule|regulation|directive|circular|requirement|limit|rate|fee|charge|interest|tax|levy|compliance|kyc|aml|capital|reserve|guidance|law|act|notice)\b/i;
+const SMALL_TALK = /^(hi|hello|hey|good (morning|afternoon|evening)|thanks?|thank you|ok(ay)?|yes|no|please|stop|help)[\s!.?]*$/i;
+
+function looksLikePolicyQuestion(text) {
+  const question = String(text || '').trim();
+  if (question.length < 12 || SMALL_TALK.test(question)) return false;
+  if (question.split(/\s+/).length < 3) return false;
+  // A policy-sounding word is the clearest signal; a real question without one ("what does the BoG
+  // require for savings accounts?") is still worth a look, so a question mark also counts.
+  return POLICY_QUESTION.test(question) || question.includes('?');
+}
+
+// The bank-policy → approved-websites fallback. Returns null when it doesn't apply, otherwise the
+// payload the browser is told about (and that is also fed to the model as context).
+async function policyWebFallback({ question, citations, attachedDocs, autoContext }) {
+  if (citations.length || attachedDocs.length || autoContext) return null; // the knowledge bases had something
+  if (!isKbOnlineFallbackEnabled() || !looksLikePolicyQuestion(question)) return null;
+  const sites = db.prepare('SELECT domain FROM allowed_domains').all().map((r) => r.domain);
+  if (!sites.length) return null; // nothing approved to search — stay inside the bank's own documents
+
+  try {
+    const results = await webSearch(question, { sitesOnly: true });
+    const usable = results.slice(0, 4);
+    logger.info('Searched the approved websites because the bank policies had no answer', {
+      sites: sites.length,
+      results: usable.length,
+    });
+    return { query: question, sites, results: usable.map((r) => ({ title: r.title, url: r.url })) };
+  } catch (err) {
+    logger.warn('Could not search the approved websites', { error: err.message });
+    return { query: question, sites, results: [], error: err.message };
+  }
+}
+
+// What the model is told when the fallback produced results (or failed).
+function policyFallbackPrompt(payload) {
+  if (!payload) return null;
+  if (payload.error) {
+    return (
+      'The bank\'s own documents did not contain an answer to this question, and a search of the websites ' +
+      `the bank has approved failed (${payload.error}). Do not invent a policy answer. Say plainly that you ` +
+      'could not find it in the bank\'s policies, and suggest the relevant department or the approved website.'
+    );
+  }
+  if (!payload.results.length) return null;
+  const list = payload.results.map((r, i) => `${i + 1}. ${r.title}\n${r.url}`).join('\n\n');
+  return (
+    "The bank's own documents did not contain an answer to this question, so these results come from websites " +
+    `the bank has approved (${payload.sites.join(', ')}):\n\n${list}\n\n` +
+    'Answer from these results only, cite the source URL(s), and make clear the information comes from an ' +
+    "external website rather than from the bank's own policies. If they still do not answer it, say so " +
+    'plainly and suggest who in the bank can — never invent a policy, rate or rule.'
+  );
+}
+
 // Shared by /stream (a fresh user message was just inserted) and /regenerate (the conversation's
 // last message is already a user message, either unchanged or freshly edited) — everything from
 // context retrieval through streaming the assistant's reply and saving it lives here once.
 async function runAssistantTurn(
   res,
-  { convo, user, model, documentIds, lastUserContent, userMessageId, forceWebSearch, think, isNewConversation, supersedeMessageId }
+  {
+    convo,
+    user,
+    model,
+    documentIds,
+    lastUserContent,
+    userMessageId,
+    forceWebSearch,
+    think,
+    isNewConversation,
+    supersedeMessageId,
+    languageOverride,
+  }
 ) {
   const cleanDocIds = Array.isArray(documentIds) ? documentIds.filter((id) => Number.isInteger(id)) : [];
   const { text: explicitContext, docs: attachedDocs } = getExplicitContext(cleanDocIds, user);
@@ -137,15 +295,36 @@ async function runAssistantTurn(
     .prepare('SELECT role, content FROM messages WHERE conversation_id = ? AND is_active = 1 ORDER BY id ASC')
     .all(convo.id);
 
+  // Which language this answer should be in, and the bank's approved wording for that language
+  // (an administrator-maintained terminology list; empty unless they filled it in).
+  const language = resolveAnswerLanguage(user, lastUserContent, model, languageOverride);
+  const languageTerms = languageSettings.glossaryFor(language.code);
+  // Capability lookup happens before retrieval now, because translating a local-language question
+  // for document search has to know whether this model can be asked to reason first.
+  let capabilities = await llm.getCapabilities(model);
+  const searchQuery = await searchQueryFor(model, capabilities, lastUserContent, language, languageTerms);
+
   // Only auto-retrieved sources become "citations" — explicitly attached documents are already
   // visible as attachment chips on the user's own message, so citing them again would be noise.
   const { text: autoContext, sources: citations } = await getHybridContext(
     user,
-    lastUserContent,
+    searchQuery,
     attachedDocs.map((d) => d.id)
   );
 
+  // Nothing in the knowledge bases answered this: look in the websites the bank has approved. Only
+  // the approved domains are searched (never the open web), the question is not sent anywhere else,
+  // and staff are told below the answer which sites were used — a policy answer must never look as
+  // though it came from the bank's own documents when it didn't.
+  const policyFallback = await policyWebFallback({
+    question: lastUserContent,
+    citations,
+    attachedDocs,
+    autoContext,
+  });
+
   const contextBlocks = [explicitContext, autoContext].filter(Boolean);
+  const fallbackPrompt = policyFallbackPrompt(policyFallback);
   const systemMessages = [
     {
       role: 'system',
@@ -162,7 +341,13 @@ async function runAssistantTurn(
         'P*r*(1+r)^n / ((1+r)^n - 1), with r the monthly rate) unless the user says the loan is flat-rate. ' +
         'Format answers with Markdown: headings and bullet points where they help, tables for row/column data, ' +
         'fenced code blocks with a language tag for code, and $...$ / $$...$$ for mathematical formulas. ' +
-        `Today's date is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}.`,
+        `Today's date is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}.` +
+        // Rates and search failures are where small models most often waffle about "no real-time
+        // access" instead of saying what actually happened.
+        (isExchangeRateEnabled()
+          ? ' For any exchange-rate or currency-conversion question, call the exchange_rate tool and give the rate with its date and source — never guess one.'
+          : '') +
+        ' If a web search returns no results or fails, say plainly that the search was run and what came back (for example that the search service refused the request), and never claim to have live data you do not have.',
     },
   ];
   // A house model's persona is baked into Ollama as a default SYSTEM prompt, but Ollama drops that
@@ -184,6 +369,11 @@ async function runAssistantTurn(
   }
   const memoryBlock = memoryPrompt(user.id);
   if (memoryBlock) systemMessages.push({ role: 'system', content: memoryBlock });
+  // Reply language goes after the persona and the person's own preferences, so it reads as the
+  // final word on how to phrase things (but before the retrieved excerpts, which it also governs).
+  const languageBlock = L.replyInstruction(language.code, languageTerms);
+  if (languageBlock) systemMessages.push({ role: 'system', content: languageBlock });
+  if (fallbackPrompt) systemMessages.push({ role: 'system', content: fallbackPrompt });
   if (contextBlocks.length) {
     systemMessages.push({
       role: 'system',
@@ -198,15 +388,20 @@ async function runAssistantTurn(
         contextBlocks.join('\n\n'),
     });
   }
-  const capabilities = await llm.getCapabilities(model);
+  // Capabilities were fetched before retrieval (see above) and are refetched if a fallback takes over.
   const messagesForModel = fitHistoryToContext(systemMessages, history, capabilities.tools, llm.contextTokens(model));
+  // The model actually answering. It starts as the one the person chose, and changes only if that
+  // one fails before producing anything and an admin-configured fallback takes over.
+  let activeModel = model;
+  const failedModels = [];
+  const turnStartedAt = Date.now();
   // Reasoning ("thinking") models are far slower on CPU when they reason first, so it's opt-in per
   // message via the composer's Think toggle — and must be sent as an explicit false to turn off,
   // since thinking-capable models in Ollama reason by default.
-  const thinkFlag = capabilities.thinking ? { think: Boolean(think) } : {};
+  const thinkFlag = () => (capabilities.thinking ? { think: Boolean(think) } : {});
   // The behind-the-scenes correction passes below are short, mechanical follow-ups — never worth
   // the extra wait of reasoning first.
-  const thinkOff = capabilities.thinking ? { think: false } : {};
+  const thinkOff = () => (capabilities.thinking ? { think: false } : {});
 
   if (imageDocs.length && capabilities.vision) {
     const lastMessage = messagesForModel[messagesForModel.length - 1];
@@ -219,8 +414,25 @@ async function runAssistantTurn(
     attachments: attachmentsMeta,
     citations,
     userMessageId: userMessageId || null,
+    language: language.code,
+    // The chosen language couldn't be used for this model: say so straight away rather than letting
+    // an English answer look like a translator failure. The reason is spelled out for the person.
+    ...(language.mode === 'unavailable'
+      ? { languageUnavailable: { language: language.wanted, label: L.labelOf(language.wanted), reason: unavailableReason(language.wanted, model) } }
+      : {}),
     imagesAttachedButUnsupported: Boolean(imageDocs.length && !capabilities.vision),
   });
+  if (language.mode === 'unavailable') {
+    sendEvent(res, 'language-unavailable', {
+      language: language.wanted,
+      model,
+      reason: unavailableReason(language.wanted, model),
+    });
+  }
+
+  // Which approved websites were searched instead of the bank's documents, so the answer is never
+  // mistaken for something that came from the bank's own policies.
+  if (policyFallback) sendEvent(res, 'policy-web-search', policyFallback);
 
   const controller = new AbortController();
   res.req.on('close', () => controller.abort());
@@ -231,10 +443,11 @@ async function runAssistantTurn(
   // Shared across every tool call in this turn — lets a web_search's result domains become
   // fetchable via fetch_url later in the same turn without needing admin pre-approval.
   const toolContext = { user, unlockedDomains: new Set() };
+  for (const site of policyFallback?.sites || []) toolContext.unlockedDomains.add(site);
   const effectiveForceWebSearch = forceWebSearch || ONLINE_SEARCH_INTENT.test(lastUserContent);
   // Tracks whether a real web_search happened this turn (forced or autonomous), so the corrective
   // retry below only fires when the model genuinely never looked anything up.
-  let searchedThisTurn = effectiveForceWebSearch;
+  let searchedThisTurn = effectiveForceWebSearch || Boolean(policyFallback && !policyFallback.error);
   try {
     // The globe-icon toggle (or typed phrasing like "search online" / "go to online", detected
     // above): guarantees a search actually happens for this message, rather than hoping the model
@@ -314,15 +527,83 @@ async function runAssistantTurn(
         sendEvent(res, 'token', { delta });
       },
     };
+    // Switches to the next fallback model after `err`. Returns false when there is none left.
+    const switchToFallback = async (err) => {
+      failedModels.push(activeModel);
+      for (const candidate of modelRouting.fallbackCandidates(failedModels)) {
+        try {
+          llm.resolve(candidate); // throws if it's an external model that has since been disabled
+        } catch {
+          failedModels.push(candidate);
+          continue;
+        }
+        const from = activeModel;
+        activeModel = candidate;
+        capabilities = await llm.getCapabilities(candidate);
+        logger.warn('Model failed — falling back', { from, to: candidate, reason: err.message, conversationId: convo.id });
+        sendEvent(res, 'fallback', { from, to: candidate, external: llm.isExternal(candidate), reason: err.message });
+        // The fallback model may not be approved for this language. Rather than have it improvise in
+        // a language the bank never tested it in, carry on in English and say why — the answer is
+        // still produced, just not in a language nobody has verified this model can speak.
+        if (language.code !== 'en' && !languageSettings.isEnabled(language.code)) {
+          language.code = L.DEFAULT_LANGUAGE;
+        } else if (language.code !== 'en' && !languageSettings.usableForModel(language.code, candidate)) {
+          const wanted = language.code;
+          language.code = L.DEFAULT_LANGUAGE;
+          // The Twi/Ga/French instruction is already in the prompt, so it has to be countermanded
+          // explicitly — otherwise the model still tries to answer in a language the fallback model
+          // was never approved for.
+          messagesForModel.push({
+            role: 'system',
+            content:
+              `Disregard any earlier instruction to answer in ${L.nameOf(wanted)}: the model available now has not been ` +
+              'approved for that language. Answer in English.',
+          });
+          sendEvent(res, 'language-unavailable', {
+            language: wanted,
+            model: candidate,
+            reason: `It has not been approved for ${candidate} yet — an administrator has to test it first`,
+          });
+        }
+        return true;
+      }
+      return false;
+    };
+    // A model that can't see images mustn't be handed any (e.g. after falling back to a text model).
+    const messagesFor = () =>
+      !capabilities.vision && messagesForModel.some((m) => m.images)
+        ? messagesForModel.map(({ images, ...rest }) => rest)
+        : messagesForModel;
+
     for (let round = 0; ; round++) {
-      const offerTools = capabilities.tools && round < MAX_TOOL_ROUNDS;
-      const turn = await llm.streamChat(model, {
-        messages: messagesForModel,
-        tools: offerTools ? TOOL_DEFS : undefined,
-        ...thinkFlag,
-        signal: controller.signal,
-        ...streamHandlers,
-      });
+      let turn;
+      for (;;) {
+        // Once any text has reached the browser, switching models would splice two answers
+        // together, so a failure after that point is reported instead of retried elsewhere.
+        let produced = false;
+        try {
+          turn = await llm.streamChat(activeModel, {
+            messages: messagesFor(),
+            tools: capabilities.tools && round < MAX_TOOL_ROUNDS ? toolDefs() : undefined,
+            ...thinkFlag(),
+            signal: controller.signal,
+            onThinking: (delta) => {
+              produced = true;
+              streamHandlers.onThinking(delta);
+            },
+            onContent: (delta) => {
+              produced = true;
+              streamHandlers.onContent(delta);
+            },
+          });
+          modelRouting.recordSuccess(activeModel);
+          break;
+        } catch (err) {
+          if (err.name === 'AbortError' || controller.signal.aborted) throw err;
+          modelRouting.recordFailure(activeModel, err.message);
+          if (produced || !(await switchToFallback(err))) throw err;
+        }
+      }
       thinkingFull += turn.thinking;
       if (!turn.toolCalls.length) break;
 
@@ -336,7 +617,20 @@ async function runAssistantTurn(
 
         const { text: resultText, meta } = await executeTool(toolName, toolArgs, toolContext);
 
-        if (toolName === 'web_search') searchedThisTurn = true;
+        if (toolName === 'web_search') {
+          searchedThisTurn = true;
+          // The model often answers "I have no live data" when a search came back empty or was refused
+          // by the provider. Show staff what actually happened, with the sites if the bank restricts
+          // searching to approved domains.
+          if (/^No results found|^Error:/i.test(resultText)) {
+            sendEvent(res, 'web-search-result', {
+              query: toolArgs.query,
+              sites: isSearchRestricted() ? db.prepare('SELECT domain FROM allowed_domains').all().map((r) => r.domain) : [],
+              results: [],
+              error: resultText.replace(/^Error:\s*/, '').split('\n')[0].slice(0, 300),
+            });
+          }
+        }
 
         sendEvent(res, 'tool', { name: toolName, args: toolArgs, status: 'done', result: resultText.slice(0, 500) });
         messagesForModel.push({ role: 'tool', content: resultText, tool_name: toolName, tool_call_id: call.id });
@@ -397,10 +691,10 @@ async function runAssistantTurn(
           'file and you did not call a tool to do so, call the matching create_*_document tool now with the content. ' +
           'If no real file was actually requested, do not call anything — this note does not apply.',
       });
-      const retry = await llm.completeChat(model, {
-        messages: messagesForModel,
-        tools: TOOL_DEFS,
-        ...thinkOff,
+      const retry = await llm.completeChat(activeModel, {
+        messages: messagesFor(),
+        tools: toolDefs(),
+        ...thinkOff(),
         signal: controller.signal,
       });
       for (const call of retry.toolCalls) {
@@ -453,7 +747,7 @@ async function runAssistantTurn(
             "exist. If you have any relevant general knowledge, give a corrected reply using it instead of " +
             'refusing. Reply with the corrected answer only, not a description of what changed.',
       });
-      const correction = await llm.completeChat(model, { messages: messagesForModel, ...thinkOff, signal: controller.signal });
+      const correction = await llm.completeChat(activeModel, { messages: messagesFor(), ...thinkOff(), signal: controller.signal });
       const corrected = correction.content.trim();
       if (corrected) {
         full = corrected;
@@ -466,10 +760,44 @@ async function runAssistantTurn(
 
   let newMessageId = null;
   let versionInfo = null;
+  // Quality watch on an answer that was supposed to be in another language. Two things count as
+  // unreliable, and both are recorded on the message so the warning is still there when the
+  // conversation is reopened (and counted in the admin portal's usage figures):
+  //  - it reads as repetitive nonsense ("wɔ bɔɔ kɛ bɔɔ kɛ wɔ kɔnɛ kɔnɛ…", see languages.js), or
+  //  - it simply isn't in the requested language at all, which means no translation happened.
+  // Either way the person is told, given an "answer in English" button, and the event is logged so
+  // an administrator can see how often this happens — with a reference to this reply, never a copy of
+  // the question or answer.
+  let languageWarning = null;
+  let qualityEvent = null;
+  if (language.code !== 'en' && full) {
+    if (L.looksUnreliableAnswer(full)) languageWarning = 'unreliable';
+    else if (!L.isWrittenIn(full, language.code)) languageWarning = 'not-translated';
+    if (languageWarning) {
+      qualityEvent = { language: language.code, reason: languageWarning };
+      logger.warn('A reply in a local language looked unreliable', {
+        language: language.code,
+        model: activeModel,
+        reason: languageWarning,
+        conversationId: convo.id,
+      });
+      sendEvent(res, 'language-warning', { language: language.code, model: activeModel, reason: languageWarning });
+    }
+  } else if (language.mode === 'unavailable') {
+    qualityEvent = { language: language.wanted, reason: 'unavailable' };
+    logger.warn('A reply could not be given in the requested language', {
+      language: language.wanted,
+      model: activeModel,
+      reason: 'unavailable',
+      conversationId: convo.id,
+    });
+  }
   if (full || generatedAttachments.length) {
     const result = db
       .prepare(
-        'INSERT INTO messages (conversation_id, role, content, attachments, citations, thinking, alt_group_id, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, 1)'
+        `INSERT INTO messages (conversation_id, role, content, attachments, citations, thinking, alt_group_id, is_active,
+                               model, duration_ms, fallback_from, language, language_warning)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`
       )
       .run(
         convo.id,
@@ -478,9 +806,26 @@ async function runAssistantTurn(
         generatedAttachments.length ? JSON.stringify(generatedAttachments) : null,
         citations.length ? JSON.stringify(citations) : null,
         thinkingFull || null,
-        altGroupId
+        altGroupId,
+        activeModel,
+        Date.now() - turnStartedAt,
+        activeModel !== model ? model : null,
+        language.code,
+        languageWarning || (language.mode === 'unavailable' ? `unavailable:${language.wanted}` : null)
       );
     newMessageId = result.lastInsertRowid;
+    if (qualityEvent) {
+      // References only (message, conversation, language, model, reason) — monitoring must not become
+      // a second copy of the bank's conversations.
+      languageQuality.recordEvent({
+        messageId: newMessageId,
+        conversationId: convo.id,
+        userId: user.id,
+        language: qualityEvent.language,
+        model: activeModel,
+        reason: qualityEvent.reason,
+      });
+    }
     if (!altGroupId) {
       altGroupId = newMessageId;
       db.prepare('UPDATE messages SET alt_group_id = ? WHERE id = ?').run(altGroupId, newMessageId);
@@ -498,7 +843,7 @@ async function runAssistantTurn(
   sendEvent(res, 'done', { conversationId: convo.id, messageId: newMessageId, versionInfo });
 
   if (isNewConversation && full) {
-    const title = await generateTitle(model, lastUserContent, full, capabilities);
+    const title = await generateTitle(activeModel, lastUserContent, full, capabilities, language.code);
     if (title) {
       db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(title, convo.id);
       sendEvent(res, 'title', { conversationId: convo.id, title });
@@ -506,6 +851,59 @@ async function runAssistantTurn(
   }
 
   res.end();
+}
+
+// Applies the per-person message limit and the queue's up-front checks. Returns true when the
+// request was refused (the 429 response has already been sent), so callers can simply return.
+// Runs before anything is saved, so a refused message leaves no half-created conversation.
+function refuseIfOverLimit(res, user, model) {
+  const rate = rateLimit.consume(user.id);
+  if (!rate.ok) {
+    logger.warn('Rate limit hit', { userId: user.id, retryAfterSeconds: rate.retryAfterSeconds });
+    res.set('Retry-After', String(rate.retryAfterSeconds));
+    res.status(429).json({ error: rate.message, code: 'rate_limited', retryAfterSeconds: rate.retryAfterSeconds });
+    return true;
+  }
+  if (!llm.isExternal(model)) {
+    const full = queue.precheck(user.id);
+    if (full) {
+      logger.warn('Chat queue refused a request', { userId: user.id, code: full.code });
+      res.status(429).json({ error: full.message, code: full.code });
+      return true;
+    }
+  }
+  return false;
+}
+
+// Runs `work` once this machine has capacity for it, telling the browser where it stands in line
+// while it waits ("queue" events). Models run by an external provider don't use this machine, so
+// they never wait. If the person gives up (closes the tab, presses stop) while still waiting,
+// they simply leave the line.
+async function withModelSlot(res, user, model, work) {
+  if (llm.isExternal(model)) return work();
+  const waiting = new AbortController();
+  const onClose = () => waiting.abort();
+  res.on('close', onClose);
+  let release;
+  try {
+    release = await queue.acquire(user.id, {
+      signal: waiting.signal,
+      onUpdate: (info) => {
+        if (!res.writableEnded && !res.destroyed) sendEvent(res, 'queue', info);
+      },
+    });
+  } catch (err) {
+    res.off('close', onClose);
+    if (err.name !== 'AbortError' && !res.writableEnded) sendEvent(res, 'error', { error: err.message });
+    if (!res.writableEnded) res.end();
+    return undefined;
+  }
+  try {
+    return await work();
+  } finally {
+    release();
+    res.off('close', onClose);
+  }
 }
 
 router.post('/stream', asyncHandler(async (req, res) => {
@@ -524,6 +922,7 @@ router.post('/stream', asyncHandler(async (req, res) => {
 
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!user) return res.status(401).json({ error: 'Not authenticated' });
+  if (refuseIfOverLimit(res, user, model)) return undefined;
 
   let convo;
   let isNewConversation = false;
@@ -563,17 +962,19 @@ router.post('/stream', asyncHandler(async (req, res) => {
     'X-Accel-Buffering': 'no',
   });
 
-  await runAssistantTurn(res, {
-    convo,
-    user,
-    model,
-    documentIds: cleanDocIds,
-    lastUserContent: content,
-    userMessageId: insertResult.lastInsertRowid,
-    forceWebSearch: Boolean(forceWebSearch),
-    think: Boolean(think),
-    isNewConversation,
-  });
+  await withModelSlot(res, user, model, () =>
+    runAssistantTurn(res, {
+      convo,
+      user,
+      model,
+      documentIds: cleanDocIds,
+      lastUserContent: content,
+      userMessageId: insertResult.lastInsertRowid,
+      forceWebSearch: Boolean(forceWebSearch),
+      think: Boolean(think),
+      isNewConversation,
+    })
+  );
 }));
 
 // Re-runs the assistant's reply for the conversation's current last turn — used both for a plain
@@ -581,7 +982,7 @@ router.post('/stream', asyncHandler(async (req, res) => {
 // switcher can bring it back) and after an edited user message has cascade-deleted everything
 // after it, leaving no reply at all yet.
 router.post('/regenerate', asyncHandler(async (req, res) => {
-  const { conversationId, model, think } = req.body || {};
+  const { conversationId, model, think, languageOverride } = req.body || {};
   const userId = req.session.userId;
 
   if (typeof model !== 'string' || !model.trim()) {
@@ -590,12 +991,18 @@ router.post('/regenerate', asyncHandler(async (req, res) => {
   if (!Number.isInteger(conversationId)) {
     return res.status(400).json({ error: 'A conversation id is required' });
   }
+  // "Answer in English instead" for a reply that came out garbled in Twi/Ga/French. It applies to
+  // this turn only: the person's saved language preference is deliberately left alone.
+  if (languageOverride !== undefined && !L.CODES.includes(languageOverride)) {
+    return res.status(400).json({ error: 'Choose a valid language to regenerate in' });
+  }
 
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!user) return res.status(401).json({ error: 'Not authenticated' });
 
   const convo = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(conversationId, userId);
   if (!convo) return res.status(404).json({ error: 'Conversation not found' });
+  if (refuseIfOverLimit(res, user, model)) return undefined;
 
   // The last *active* message — not simply the last row by id, since a version the user switched
   // away from can have a higher id than the one currently shown.
@@ -626,15 +1033,18 @@ router.post('/regenerate', asyncHandler(async (req, res) => {
     'X-Accel-Buffering': 'no',
   });
 
-  await runAssistantTurn(res, {
-    convo,
-    user,
-    model,
-    documentIds,
-    lastUserContent: userMessage.content,
-    supersedeMessageId,
-    think: Boolean(think),
-  });
+  await withModelSlot(res, user, model, () =>
+    runAssistantTurn(res, {
+      convo,
+      user,
+      model,
+      documentIds,
+      lastUserContent: userMessage.content,
+      supersedeMessageId,
+      think: Boolean(think),
+      languageOverride,
+    })
+  );
 }));
 
 // A deliberately bare-bones completion for the model-comparison tool: no RAG context, no tools,
@@ -649,6 +1059,9 @@ router.post('/quick', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'A prompt is required' });
   }
 
+  const user = { id: req.session.userId };
+  if (refuseIfOverLimit(res, user, model)) return undefined;
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -656,22 +1069,26 @@ router.post('/quick', asyncHandler(async (req, res) => {
     'X-Accel-Buffering': 'no',
   });
 
-  const controller = new AbortController();
-  req.on('close', () => controller.abort());
+  await withModelSlot(res, user, model, async () => {
+    const controller = new AbortController();
+    req.on('close', () => controller.abort());
 
-  try {
-    await llm.streamChat(model, {
-      messages: [{ role: 'user', content: prompt }],
-      signal: controller.signal,
-      onContent: (delta) => sendEvent(res, 'token', { delta }),
-    });
-    sendEvent(res, 'done', {});
-  } catch (err) {
-    if (err.name !== 'AbortError') {
-      sendEvent(res, 'error', { error: err.message || 'Could not reach Ollama' });
+    try {
+      await llm.streamChat(model, {
+        messages: [{ role: 'user', content: prompt }],
+        signal: controller.signal,
+        onContent: (delta) => sendEvent(res, 'token', { delta }),
+      });
+      modelRouting.recordSuccess(model);
+      sendEvent(res, 'done', {});
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        modelRouting.recordFailure(model, err.message);
+        sendEvent(res, 'error', { error: err.message || 'Could not reach Ollama' });
+      }
     }
-  }
-  res.end();
+    res.end();
+  });
 }));
 
 module.exports = router;

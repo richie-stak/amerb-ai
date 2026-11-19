@@ -45,9 +45,49 @@ Both run the same launcher (`scripts/launch.js`), which checks this machine befo
 
 > `imagegen\start.bat` / `imagegen/start.sh` on their own only start the image generation microservice (port 7861) — not AMERB AI itself. Always start from the launcher at the project root.
 
-### Network access
+### Keeping it running (start at boot, restart after a crash)
 
-By default the server listens on every network interface (`HOST=0.0.0.0` in `.env`), so other PCs on the same network can open it at `https://<this machine's IP>:3000` — the launcher prints the exact addresses on startup. Set `HOST=127.0.0.1` to allow this computer only. If other PCs can't connect, the firewall is blocking the port: on Windows allow Node.js when prompted (or have IT open TCP 3000); on Linux run e.g. `sudo ufw allow 3000/tcp`. If staff will use a fixed IP or a DNS name (e.g. `amerb.bank.local`), list it in `PUBLIC_HOSTNAMES` so the HTTPS certificate covers it.
+`start.bat` stops when its window is closed or the PC restarts. To run AMERB AI as a service instead:
+
+- **Windows:** right-click **`install-service.bat`** → *Run as administrator*. It installs a Windows
+  service called **AMERB AI** that starts at boot and is restarted automatically if it crashes; remove it
+  later with `uninstall-service.bat`. Check on it with `npm run service:status`.
+- **Linux:** `sudo deploy/install-systemd.sh` installs and starts a systemd unit.
+
+Full details, including which Windows account to run it as when Ollama is a per-user install, are in
+**[docs/WINDOWS-SERVICE.md](docs/WINDOWS-SERVICE.md)**.
+
+### Docker
+
+`docker compose up -d` runs the app, Ollama and (optionally) the image service in containers, pulling
+the models on first start — convenient for moving the whole stack to another machine. See
+**[docs/DOCKER.md](docs/DOCKER.md)**.
+
+### Network access (Windows and Linux)
+
+The server listens on **every** network interface (`HOST=0.0.0.0` in `.env`), so it is reachable from other PCs on the bank's network at `https://<this machine's IP>:3000`. It runs on Windows and Linux from the same folder and the same command.
+
+**Find the address to give staff.** On startup the launcher prints every address, the same way this does at any time:
+
+```bash
+node scripts/networking.js          # or: npm run network:info
+```
+
+It lists each LAN address, says whether the HTTPS certificate covers it, and prints the firewall command for the platform.
+
+**Firewall.** Desktop firewalls block incoming connections by default, so a fresh machine can look "down" to everyone else:
+
+- **Windows** — installing or repairing the service now adds the rule itself (TCP 3000, named "AMERB AI (TCP 3000)"). By hand, in an Administrator PowerShell: `netsh advfirewall firewall add rule name="AMERB AI (TCP 3000)" dir=in action=allow protocol=TCP localport=3000`.
+- **Linux** — `sudo sh deploy/install-systemd.sh` opens the port in ufw or firewalld when one is active (`--no-firewall` skips it when IT manages the firewall centrally). By hand: `sudo ufw allow 3000/tcp` or `sudo firewall-cmd --add-port=3000/tcp --permanent && sudo firewall-cmd --reload`.
+
+**Certificate.** The app generates its own HTTPS certificate on first start, covering `localhost`, the machine's hostname and the addresses it had at that moment. If the machine's address changes (DHCP, a new adapter), browsers will warn on the new address. Fix it by re-issuing the certificate for the current addresses:
+
+- **Windows service:** `repair-service.bat --refresh-certificate` (Administrator) — backs up the old one and generates a new one on restart.
+- **Any platform:** stop the app, delete the `certs` folder, start it again.
+
+Staff PCs must then trust the new `certs\server.cert` (copy it to each PC → Install Certificate → Local Machine → Trusted Root Certification Authorities). To cover a fixed IP or a DNS name such as `amerb.bank.local`, list it in `PUBLIC_HOSTNAMES` in `.env` before re-issuing.
+
+**Keeping it running.** On Windows install it as a service (`install-service.bat`, or `repair-service.bat` to finish a half-installed one) and on Linux as a systemd unit (`sudo sh deploy/install-systemd.sh`); both start at boot and restart after a crash, which is what makes the address above stay live without anyone logged in. See [docs/WINDOWS-SERVICE.md](docs/WINDOWS-SERVICE.md).
 
 ### Moving it to another computer
 
@@ -87,11 +127,20 @@ The first request to the image generation service downloads `stabilityai/sd-turb
 npm test
 ```
 
-Each test file spins up a real instance of the app as its own process against a disposable temporary SQLite database — never `data/amerb-ai.sqlite` — so it's always safe to run, including against a machine with real staff data on it. Covers login lockout, department-scoped document access, message-version switching, and conversation-retention cleanup (including the exact boundary condition behind a real incident where a manual test once deleted more than intended).
+Each test file spins up a real instance of the app as its own process against a disposable temporary SQLite database — never `data/amerb-ai.sqlite` — so it's always safe to run, including against a machine with real staff data on it. Covers login lockout, department-scoped document access, message-version switching, conversation-retention cleanup (including the exact boundary condition behind a real incident where a manual test once deleted more than intended), the waiting line and rate limits, model fallback, the quality report, and the reply-language rules (against a stand-in Ollama, so no real model is needed and no real chat is produced).
+
+Runs take about a minute and a half: files run one at a time (`--test-concurrency=1`), because running several app instances at once made the suite flaky on modest Windows machines — the first connection to a freshly started server is occasionally dropped by the local firewall/antivirus, which is why the test client retries connection-level failures. `npm run test:fast` runs two files at a time on a machine with headroom.
 
 ## Features
 
 - **Accounts & sessions** — signup/login restricted to `@amenfimanbank.com` addresses, bcrypt-hashed passwords, httpOnly session cookies.
+- **Three folders, not one pile** — each knowledge base has its own folder, both in the app and on disk beside the database:
+  - `data\knowledge\Bank-wide\` — **bank policies**, visible to every staff member; only an administrator can add or remove them;
+  - `data\knowledge\Department - <name>\` — shared with that department only;
+  - `data\knowledge\Personal - <username>\` — one person's own chat attachments and AI-made files.
+
+  The database stays authoritative and enforces the access rules; the folders are a kept-in-step copy so IT can open them in Explorer, copy them to a backup drive, or hand a department its own folder. Files move between folders when a document is shared or published, are removed when it is deleted, and a reconcile pass (at startup and every five minutes) restores anything deleted by hand and removes files that aren't in the app. A `README.txt` in `data\knowledge` says the same to whoever opens it.
+- **When the policies don't answer, ask the approved websites** — if none of the knowledge bases has anything relevant and the question is a policy question (not "hello"), AMERB AI searches **only the domains an administrator approved** (never the open web) and answers from those results, with a note under the reply naming the sites searched and links to the pages. If the search fails, it says so and is told not to invent a policy. On by default; Admin → Tools turns it off, and it does nothing until at least one domain is approved.
 - **Three separate knowledge bases** — every access rule lives in `server/documentAccess.js`:
   - **Bank-wide** — policies and documents for all staff. Every staff member can read and search them; only admins can add or remove them.
   - **Department** (Credit, Loans, Finance, HR, IT, …) — anyone in a department can upload files for the whole department, and only staff signed in under that department can see or search them. A Credit officer's uploads are invisible to HR and vice versa. The uploader or an admin can delete them.
@@ -112,13 +161,37 @@ Each test file spins up a real instance of the app as its own process against a 
   - **Local LLMs**: see installed Ollama models, pull new ones from the Ollama library with a live progress bar, or delete ones no longer needed — all without touching a terminal.
   - **External AI**: connect cloud AI providers — **OpenAI**, **Anthropic (Claude)**, **DeepSeek**, or any **OpenAI-compatible** service (Groq, Mistral, OpenRouter, Together, a self-hosted vLLM, …). Paste an API key, click *Connect & load models* (the key is checked straight away by listing the provider's models), then tick which models staff may use. They appear in the chat model picker marked ☁ with the provider's name, and work with every tool (calculator, documents, web search, memory) and with Compare models. API keys are encrypted at rest (AES-256-GCM, key in `data/secret.key` — keep that file with the database when moving or backing up; it's never committed) and only ever shown masked. **Privacy:** unlike local models, an external model sends the staff member's messages and any knowledge base excerpts used to answer them to that provider, and usage is billed to the key's account — staff see a red notice under the message box whenever one is selected. **Customer details are masked by default:** Ghana Card, phone, email, TIN and account/card numbers are replaced with placeholders like `[ACCOUNT_NUMBER_1]` in everything sent to the provider and restored in the reply staff see (an admin can switch this off). Names and free text are not masked, so still only enable models your data policy allows.
   - **Knowledge base**: see every uploaded document across all departments, with uploader and size, and delete anything no longer needed.
-  - **Tools**: toggle web search on/off, and manage the domain allowlist for the web fetch tool.
+  - **Tools**: toggle web search on/off, manage the domain allowlist for the web fetch tool, and set the **language** options — the default reply language for staff, whether staff may choose their own, and the glossary of preferred Twi/Ga wording for banking terms.
   - **Analytics**: usage totals, messages by department/model, thumbs up/down feedback, most active staff, most-cited documents.
   - **System**: download a full database backup at any time (safe to run while staff are actively using the app — uses SQLite's own online-backup API, not a raw file copy), and configure automatic conversation retention (delete conversations older than N days; disabled by default). The "Clean up now" button always previews exactly what would be deleted — count, users, titles, dates — before anything is removed.
 - **Login lockout** — an account is temporarily locked for 15 minutes after 5 failed password attempts in a row, to slow down password guessing. An admin resetting a user's password also clears any active lock.
 - **Stay signed in** — login sessions are stored in the database, so restarting the server doesn't sign anyone out (sessions last 7 days). An admin resetting a password or deleting an account signs that person out everywhere.
 - **Audit log** (admin portal → Audit log) — a permanent record of sign-ins (including failed and locked-out attempts), every question asked in chat with the model that answered it, document uploads/deletions/sharing, and every admin change, with time, user, department and IP address. Filter by person, activity and dates, and export to CSV. Entries can't be edited or deleted in the app and outlive deleted accounts and chats; passwords and API keys are never recorded.
 - **Bulk staff onboarding** — the Users tab in the admin portal accepts a CSV (`username,email,department`) to create many accounts at once, each with a temporary password shown once.
+- **Operations dashboard** (admin portal → Operations) — live view of everything the app depends on: whether Ollama is reachable and how fast it answers, which models are loaded into memory and until when, CPU (with a five-minute history), memory, GPU (when an NVIDIA card is present), database and log size, free disk, and how many messages are answering or waiting right now. It also shows recent warnings and errors straight from the log file, with a filter, so most problems can be diagnosed without opening a terminal.
+- **Health check** — `GET /health` on the same HTTPS port, needing no login: `{"status":"ok",...}` with HTTP 200, or 503 when the database is unreadable (or when `?deep=1&strict=1` finds Ollama down). `?deep=1` adds an Ollama check and reports `"degraded"` rather than failing, so a supervisor doesn't restart the app for a problem restarting can't fix. Used by the Docker healthcheck and the Windows service. Add `--no-browser` / service mode as below.
+- **Waiting line for the local model** — one machine can only generate a few answers at once, so extra messages wait in a first-come line instead of stalling: the browser is shown "waiting — you're 2nd in line, about 20 sec" and updates as the line moves. Closing the tab or pressing stop leaves the line. Models run by an external provider don't wait, since they don't use this machine. The number of simultaneous answers, how many people may wait, and how many messages one person can have going are all admin settings (Operations tab and `CHAT_CONCURRENCY`, `CHAT_MAX_WAITING`, `CHAT_PER_USER` in `.env`).
+- **Per-person rate limits** — a sliding-window limit on messages per minute and per hour (default 15/minute, 300/hour) so one person or a runaway script can't monopolise the machine. Over the limit, the reply is a clear "wait about 40 seconds" message with HTTP 429 and a `Retry-After` header. Both limits are admin settings and `0` disables one.
+- **Model routing** (admin portal → Model routing) —
+  - **Per-department default model**: Credit can start its staff on one model, IT on another. It's a starting point only — anyone can still pick any model, and their own choice is remembered.
+  - **Automatic fallback**: if the chosen model can't answer at all (Ollama down, model deleted, provider outage), the turn is retried on the next model in an admin-ordered list, and finally on the local `DEFAULT_MODEL`. The person sees a quiet note saying which model answered instead, and the saved message records both. An answer is never switched halfway through — only when nothing has been written yet — so two model's outputs can't end up spliced together. The tab warns when a model in the fallback list is an external provider, since that means a local request could leave the machine.
+- **Answer quality by model** (same tab) — the thumbs up/down staff already give, turned into a per-model report: answers, ratings, approval %, average reply time, how often a model answered as a fallback, and a verdict (`Good` from 85%, `OK`, `Review` below 60% once a model has 10 ratings). Ranking uses the statistical lower bound of the approval rate, so "1 of 1" can't outrank "90 of 100". It lists the questions behind recent thumbs down for review, and suggests a better default per department when staff there rate another model clearly higher.
+- **Structured logs with rotation** — one JSON line per event in `logs/amerb-ai.log` (rotated at 10 MB, five kept; `LOG_DIR`, `LOG_LEVEL`, `LOG_MAX_MB`, `LOG_KEEP`), including one line per API request with status and duration, every model failure and fallback, and rate-limit and queue refusals. The launcher keeps its own `logs/service.log`. Nothing in the log grows without bound.
+- **Currency and exchange-rate questions** — Admin → Tools → Exchange rates lets AMERB AI look up a rate instead of guessing or claiming it has no live data. Only the currency pair is sent to the rate service (never the question or customer data), the address can be pointed at the bank's own source, and every answer states the rate, its publishing date and where it came from. Off by default.
+
+  Web search itself stopped working from many networks because DuckDuckGo answers automated clients with an anti-bot page (HTTP 202). The app no longer reports that as "no results": it says the search was refused, shows it under the reply, and logs it. For reliable searching inside the bank, run a **self-hosted SearXNG** and set SEARXNG_URL in .env — no scraping, no bot checks, and no query leaving the bank except to the engines you configure.
+- **Reply languages — English (default), Twi (Akan), Ga, French** — an administrator can offer these, **per model and only after that model passes a capability test in the language**; staff then choose their own (Workspace → Reply language) or the bank fixes one for everyone. Full operator guide: **[docs/LANGUAGES.md](docs/LANGUAGES.md)**.
+
+  **Why testing first.** Answering in another language is a *model* capability, and the app cannot add it. Measured on the machine this was built for, `qwen3:4b-instruct` produced unreadable Twi and Ga — repetitive nonsense like "wɔ bɔɔ kɛ bɔɔ kɛ wɔ kɔnɛ kɔnɛ…" in about 36 seconds. So a language stays invisible to staff until the model in front of them has passed real tests, which check: translation accuracy (does it come back in the language, with the figures intact?), comprehension and meaning (does it answer a question about an English bank paragraph with the right amount, rather than fluent-sounding noise?), the bank's approved terminology, consistency (same sentence twice), and basic prose quality. Producing *some* text in a language never counts as capability. Results are stored with the model, date, tester, score and evidence, and a later failure revokes the approval and moves affected staff back to the default.
+
+  **Safety nets that stay on regardless of the model.** A reply that reads as garbled — or that isn't in the requested language at all — is flagged under the message in chat, with **Answer in English** (regenerates the same question in English, keeping the conversation and the person's preference) and **Report translation** (records it for the administrator). Warnings are stored on the message, written to Operations → Recent warnings and errors, and counted per language under Admin → Language → Usage & quality. If a language can't be used for the selected model the answer is given in English with a plain explanation — never in an unapproved language.
+
+  **Bank wording, not machine translations.** Administrators maintain the approved wording for banking terms (`loan → bosea`) in Admin → Language → Bank wording — add, search, edit, delete, per language, with an optional context line and a record of who added and last changed the term. There are hard limits of 60 characters per field and **200 terms per language**, and an optional **approval workflow**: when it's on, a new or edited term stays *pending* and is deliberately kept out of what the model is told until an administrator approves it, so an unapproved wording can never be presented as the bank's. The list starts empty and the code never invents a translation.
+
+  **Monitoring, feedback and read-only audit access.** Every AI answer is counted per language, model and provider, with filters (date range, language, provider, model), each language's share of answers, a daily trend, and per-model figures that separate a model problem from a wording problem. Staff rate a translated reply **good / incorrect / hard to understand**, and those verdicts feed the same figures. Garbled or untranslated answers are recorded as structured warning events — references only, never question or answer text — alongside Operations → Recent warnings and errors, and an **Investigate warnings** view summarises them and flags recurring failures per model and language. A third role, **auditor**, can read the language records, capability results, usage reports and the audit log but change nothing; there is no route anywhere that edits an audit entry.
+
+  **What always holds.** The interface stays in English and only answers change language; figures, GHS amounts, dates, account numbers, product names, document titles and quoted policy wording are never translated; established Ghanaian banking terms stay recognisable; generated documents stay in English; a question written in a local language is also searched in English (English terms from the bank wording, plus one optional search-only translation); external providers are marked ☁ and keep their identifier masking. Voice input is still English-only — Whisper has no Twi or Ga support — though `SPEECH_MODEL` in `.env` can point at a fine-tuned model later.
+- **Docker Compose** — `docker compose up -d` brings up the app, Ollama (with the models pulled automatically on first run) and, with `--profile imagegen`, the image service, with named volumes for data, certificates, logs and models. See [docs/DOCKER.md](docs/DOCKER.md).
 - **Getting started guide** (Workspace menu → Getting started) — a quick reference for the less-obvious features (@-mention, voice input, saved prompts, search, read-aloud, shortcuts). Shown automatically the first time anyone reaches the chat screen in a given browser.
 
 The first account is not automatically an admin — promote your first admin manually via the SQLite database, or run the app once, sign up, then update that user's `role` column to `'admin'` in `data/amerb-ai.sqlite`.
@@ -137,6 +210,9 @@ The first account is not automatically an admin — promote your first admin man
 - **Tool-calling loop** (`server/tools.js`, wired into `server/routes/chat.js`): when the selected model reports `tools` capability, the server does up to 4 non-streaming round-trips with Ollama offering the three tools, executing any tool calls and feeding results back, before doing the final streamed answer.
 - **Image generation service** (`imagegen/service.py`): a small standalone Flask app in its own Python virtual environment (kept separate from Node entirely), wrapping a `diffusers` Stable Diffusion Turbo pipeline. The Node server calls it over `http://127.0.0.1:7861` (configurable via `IMAGEGEN_URL` in `.env`) exactly like it calls Ollama — if the service isn't running, image generation just fails with a clear error; nothing else in the app is affected.
 - **Frontend**: Plain HTML/CSS/JS (`public/`) — no build step.
+- **Queue, limits and model routing** (`server/queue.js`, `server/rateLimit.js`, `server/modelRouting.js`): the chat route admits a request through the rate limiter, then waits for a slot in a FIFO queue before the turn runs (nothing is saved if it's refused up front). The turn's model call goes through a small wrapper that records success/failure per model and, on a failure before any text has streamed, retries on the next configured fallback. Settings live in `app_settings`, so they can be changed without a restart.
+- **Logging** (`server/logger.js`, `server/monitor.js`): every console message plus a per-request line goes to a size-rotated JSON log; `/health` and the Operations tab read live state from Ollama's own API (`/api/tags`, `/api/ps`, `/api/version`), `os` counters, `nvidia-smi` when present, and SQLite's `statfs`.
+- **Reply language** (`server/languages.js`): a per-user column (`users.reply_language`) resolved against the admin defaults on every message; Twi/Ga detection is a conservative marker-based scorer (it answers in English when unsure rather than guessing, since answering a Ga speaker in Twi is worse than English); the language instruction is one extra system message, and document search gets an English version of the question via the glossary plus, optionally, one small model call.
 
 ## Security notes on the tool-use feature
 
@@ -156,6 +232,9 @@ Giving a local LLM the ability to run code and fetch web pages is a real expansi
 This is built for local/on-prem single-server use. If you plan to expose it more broadly within the bank's network:
 
 - Set a strong, random `SESSION_SECRET` in `.env`.
-- Put it behind HTTPS (e.g. a reverse proxy) — cookies are currently not marked `secure`.
+- Put it behind a reverse proxy or an internal CA certificate if staff shouldn't have to click through the self-signed one. (The session cookie is already `secure` and HTTPS-only.)
 - Sessions are already stored in SQLite (`server/sessionStore.js`) and survive restarts.
 - Review upload limits (`server/routes/documents.js`) and the retrieval context caps (`server/retrieval.js`) if departments accumulate a large number of documents.
+- Run it as a service (see [docs/WINDOWS-SERVICE.md](docs/WINDOWS-SERVICE.md)) so it comes back by itself after a reboot or crash, and point a monitor at `/health?deep=1&strict=1`.
+- Keep `logs/` and `data/` on the same disk as the database, and back up `data/amerb-ai.sqlite` together with `data/secret.key` — the key decrypts the external-provider API keys stored next to it.
+

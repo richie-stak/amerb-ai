@@ -7,7 +7,13 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1",
+    "test:fast": "node --test --test-concurrency=2",
+    "service:install": "node scripts/service/install.js",
+    "service:repair": "node scripts/service/repair.js",
+    "service:uninstall": "node scripts/service/uninstall.js",
+    "service:status": "node scripts/service/status.js",
+    "network:info": "node scripts/networking.js"
   },
   "dependencies": {
     "@highlightjs/cdn-assets": "^11.12.0",
@@ -21,6 +27,7 @@
     "mammoth": "^1.12.1",
     "mathjs": "^15.2.0",
     "multer": "^2.2.0",
+    "node-windows": "^1.0.0-beta.8",
     "pdf-parse": "^2.4.5",
     "pdfkit": "^0.19.1",
     "pptxgenjs": "^4.0.1",

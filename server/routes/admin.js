@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const { DatabaseSync, backup } = require('node:sqlite');
 const bcrypt = require('bcryptjs');
 const db = require('../db');
-const { requireAdmin } = require('../middleware/auth');
+const { requireAdmin, requireAdminOrAuditor } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const { DEPARTMENTS } = require('../departments');
 const { destroyUserSessions } = require('../sessionStore');
@@ -24,7 +24,13 @@ function generateTempPassword(length = 12) {
 }
 
 const router = express.Router();
-router.use(requireAdmin);
+// An auditor may read the audit trail and the usage reports, and nothing else — every route that
+// writes stays behind requireAdmin, so read-only access can never become a way to change something.
+const AUDITOR_READ_PATHS = [/^\/audit(\/|$)/, /^\/analytics$/];
+router.use((req, res, next) => {
+  const readOnlyReport = req.method === 'GET' && AUDITOR_READ_PATHS.some((pattern) => pattern.test(req.path));
+  return (readOnlyReport ? requireAdminOrAuditor : requireAdmin)(req, res, next);
+});
 // Every admin change (anything but a read) goes into the audit log automatically.
 router.use(auditAdminChanges);
 
@@ -50,10 +56,10 @@ router.patch('/users/:id', (req, res) => {
   if (!target) return res.status(404).json({ error: 'User not found' });
 
   if (role !== undefined) {
-    if (!['user', 'admin'].includes(role)) {
+    if (!['user', 'admin', 'auditor'].includes(role)) {
       return res.status(400).json({ error: 'Invalid role' });
     }
-    if (target.role === 'admin' && role === 'user') {
+    if (target.role === 'admin' && role !== 'admin') {
       const adminCount = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get().n;
       if (adminCount <= 1) {
         return res.status(400).json({ error: 'At least one admin account must remain' });
@@ -334,16 +340,39 @@ router.get('/settings', (req, res) => {
     houseModel: getHouseModel(),
     retentionDays: Number(getSetting('retention_days', '0')) || 0,
     externalRedaction: getSetting('external_redaction', 'true') !== 'false',
+    kbOnlineFallback: getSetting('kb_online_fallback', 'true') !== 'false',
+    exchangeRateEnabled: getSetting('exchange_rate_enabled', 'false') === 'true',
+    exchangeRateUrl: getSetting('exchange_rate_url', '') || process.env.EXCHANGE_RATE_URL || 'https://open.er-api.com/v6/latest/GHS',
   });
 });
 
 router.post('/settings', (req, res) => {
-  const { webSearchEnabled, searchRestricted, retentionDays, externalRedaction } = req.body || {};
+  const { webSearchEnabled, searchRestricted, retentionDays, externalRedaction, kbOnlineFallback, exchangeRateEnabled, exchangeRateUrl } =
+    req.body || {};
   if (externalRedaction !== undefined) {
     if (typeof externalRedaction !== 'boolean') {
       return res.status(400).json({ error: 'externalRedaction must be true or false' });
     }
     setSetting('external_redaction', externalRedaction ? 'true' : 'false');
+  }
+  if (kbOnlineFallback !== undefined) {
+    if (typeof kbOnlineFallback !== 'boolean') {
+      return res.status(400).json({ error: 'kbOnlineFallback must be true or false' });
+    }
+    setSetting('kb_online_fallback', kbOnlineFallback ? 'true' : 'false');
+  }
+  if (exchangeRateEnabled !== undefined) {
+    if (typeof exchangeRateEnabled !== 'boolean') {
+      return res.status(400).json({ error: 'exchangeRateEnabled must be true or false' });
+    }
+    setSetting('exchange_rate_enabled', exchangeRateEnabled ? 'true' : 'false');
+  }
+  if (exchangeRateUrl !== undefined) {
+    const value = String(exchangeRateUrl || '').trim();
+    if (value && !/^https:\/\//i.test(value)) {
+      return res.status(400).json({ error: 'The rate service address must start with https://' });
+    }
+    setSetting('exchange_rate_url', value);
   }
   if (webSearchEnabled !== undefined) {
     if (typeof webSearchEnabled !== 'boolean') {
@@ -603,5 +632,103 @@ router.get('/audit/export.csv', (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="amerb-audit-log-${new Date().toISOString().slice(0, 10)}.csv"`);
   res.send(`﻿${lines.join('\r\n')}`);
 });
+
+// ---------- Operations: health, queue, rate limits, logs ----------
+
+const monitor = require('../monitor');
+const logger = require('../logger');
+const modelRouting = require('../modelRouting');
+const llmLocal = require('../llm/ollama');
+const { listExternalModels } = require('../llm');
+
+router.get('/operations/status', asyncHandler(async (req, res) => {
+  res.json(await monitor.collectStatus());
+}));
+
+// Recent warnings and errors from the structured log (newest first).
+router.get('/operations/logs', (req, res) => {
+  const level = ['debug', 'info', 'warn', 'error'].includes(req.query.level) ? req.query.level : 'warn';
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+  res.json({ entries: logger.recent({ level, limit, contains: req.query.q }), file: logger.LOG_FILE });
+});
+
+const LIMIT_FIELDS = {
+  queueConcurrency: { key: 'queue_concurrency', min: 1, max: 32, label: 'Simultaneous answers' },
+  queueMaxWaiting: { key: 'queue_max_waiting', min: 0, max: 1000, label: 'People allowed to wait' },
+  queuePerUser: { key: 'queue_per_user', min: 1, max: 10, label: 'Messages one person can have going' },
+  rateLimitPerMinute: { key: 'rate_limit_per_minute', min: 0, max: 1000, label: 'Messages per minute' },
+  rateLimitPerHour: { key: 'rate_limit_per_hour', min: 0, max: 100000, label: 'Messages per hour' },
+};
+
+router.get('/operations/limits', (req, res) => {
+  const q = require('../queue').limits();
+  const r = require('../rateLimit').limits();
+  res.json({
+    queueConcurrency: q.concurrency,
+    queueMaxWaiting: q.maxWaiting,
+    queuePerUser: q.perUser,
+    rateLimitPerMinute: r.perMinute,
+    rateLimitPerHour: r.perHour,
+  });
+});
+
+router.post('/operations/limits', (req, res) => {
+  const body = req.body || {};
+  const updates = [];
+  for (const [field, spec] of Object.entries(LIMIT_FIELDS)) {
+    if (body[field] === undefined) continue;
+    const value = Number(body[field]);
+    if (!Number.isInteger(value) || value < spec.min || value > spec.max) {
+      return res.status(400).json({ error: `${spec.label} must be a whole number from ${spec.min} to ${spec.max}` });
+    }
+    updates.push([spec.key, String(value)]);
+  }
+  for (const [key, value] of updates) setSetting(key, value);
+  res.json({ ok: true });
+});
+
+// ---------- Model routing & quality ----------
+
+async function availableModelNames() {
+  let local = [];
+  try {
+    local = await llmLocal.listModels();
+  } catch {
+    /* Ollama down — external models can still be routed to */
+  }
+  const external = listExternalModels();
+  return { local, external, names: [...local.map((m) => m.name), ...external.map((m) => m.name)] };
+}
+
+router.get('/routing', asyncHandler(async (req, res) => {
+  const { local, external } = await availableModelNames();
+  res.json({
+    ...modelRouting.getRouting(),
+    departments: DEPARTMENTS,
+    models: [
+      ...local.map((m) => ({ name: m.name, label: m.name, external: false })),
+      ...external.map((m) => ({ name: m.name, label: m.label, external: true })),
+    ],
+    globalDefault: process.env.DEFAULT_MODEL || null,
+  });
+}));
+
+router.post('/routing', asyncHandler(async (req, res) => {
+  const { names } = await availableModelNames();
+  try {
+    modelRouting.setRouting(req.body || {}, { known: names, departments: DEPARTMENTS });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  res.json({ ok: true, ...modelRouting.getRouting() });
+}));
+
+router.get('/quality', (req, res) => {
+  const days = Math.min(Math.max(Number(req.query.days) || 0, 0), 3650);
+  res.json(modelRouting.qualityReport({ days }));
+});
+
+// Language settings have their own router (routes/adminLanguage.js), mounted at
+// /api/admin/language before this one, so /language never reaches here.
 
 module.exports = router;

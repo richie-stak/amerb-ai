@@ -57,6 +57,8 @@ async function generateImage(prompt, user) {
     `Generated image. Prompt: ${prompt}`
   );
 
+  require('./knowledgeFolders').mirrorDocumentById(result.lastInsertRowid);
+
   return { documentId: result.lastInsertRowid, filename, seconds: data.seconds };
 }
 

@@ -42,22 +42,30 @@
     </div>
     <input type="file" id="kb-file-input" class="hidden" multiple accept=".pdf,.docx,.xlsx,.xls,.xlsm,.csv,.txt,.md,.png,.jpg,.jpeg,.webp,.bmp,.gif">
 
-    <section class="kb-section kb-section-global">
+    <!-- The three knowledge bases are presented as three folders: each has a name, its folder on disk,
+         a count and, where it applies, the rule about who may add to it. -->
+    <section class="kb-section kb-section-global" id="kb-section-global">
       <div class="kb-section-header">
-        <div>
-          <h3><span data-icon="bank" data-icon-size="17"></span> Bank-wide</h3>
-          <p class="kb-section-hint">Policies and documents for all staff. Managed by admins.</p>
+        <div class="kb-section-heading">
+          <h3><span data-icon="folder" data-icon-size="17"></span> Bank policies <span class="kb-section-count" id="kb-global-count">0 policies</span></h3>
+          <p class="kb-section-hint">Every policy and procedure for the whole bank — managed by administrators. Visible to all staff.</p>
+          <p class="kb-folder-path">Folder: <span class="kb-folder-name">Bank-wide</span></p>
+          <p class="kb-section-note hidden" id="kb-global-staff-note">Only administrators add bank policies.</p>
         </div>
-        <button class="btn-primary btn-compact hidden" id="kb-upload-global-btn" type="button"><span data-icon="upload" data-icon-size="14"></span> Add bank-wide files</button>
+        <div class="kb-section-actions kb-section-actions-stacked">
+          <button class="btn-primary btn-compact hidden" id="kb-upload-global-btn" type="button"><span data-icon="upload" data-icon-size="14"></span> Add bank-wide files</button>
+          <p class="kb-section-note hidden" id="kb-global-folder-note">Files are also kept in the server's <code>data\knowledge\Bank-wide</code> folder.</p>
+        </div>
       </div>
       <div class="kb-list" id="kb-global-list"></div>
     </section>
 
-    <section class="kb-section kb-section-department">
+    <section class="kb-section kb-section-department" id="kb-section-department">
       <div class="kb-section-header">
-        <div>
-          <h3><span data-icon="users" data-icon-size="17"></span> <span id="kb-department-title">Department</span></h3>
+        <div class="kb-section-heading">
+          <h3><span data-icon="folder" data-icon-size="17"></span> <span id="kb-department-title">Department folder</span> <span class="kb-section-count" id="kb-department-count">0 files</span></h3>
           <p class="kb-section-hint" id="kb-department-hint">Shared with everyone in your department, and only them.</p>
+          <p class="kb-folder-path">Folder: <span class="kb-folder-name" id="kb-department-folder">Department</span></p>
         </div>
         <div class="kb-section-actions">
           <select id="kb-department-filter" class="hidden"></select>
@@ -71,11 +79,12 @@
       <div class="kb-list" id="kb-department-list"></div>
     </section>
 
-    <section class="kb-section kb-section-personal">
+    <section class="kb-section kb-section-personal" id="kb-section-personal">
       <div class="kb-section-header">
-        <div>
-          <h3><span data-icon="paperclip" data-icon-size="17"></span> My files</h3>
+        <div class="kb-section-heading">
+          <h3><span data-icon="folder" data-icon-size="17"></span> My files <span class="kb-section-count" id="kb-personal-count">0 files</span></h3>
           <p class="kb-section-hint">Files you attached in chats and documents AMERB AI made for you. Only you can see these — share one to make it available to your department.</p>
+          <p class="kb-folder-path">Folder: <span class="kb-folder-name">Personal</span></p>
         </div>
       </div>
       <div class="kb-list" id="kb-personal-list"></div>

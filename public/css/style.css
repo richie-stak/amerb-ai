@@ -1549,6 +1549,18 @@ a {
   color: var(--brand-green);
 }
 
+/* Quiet status line under the composer (e.g. "model X answered instead"). */.composer-note {
+  max-width: 760px;
+  margin: 6px auto 0;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: fit-content;
+}
+
 .thinking-block {
   margin-bottom: 10px;
   font-size: 13px;
@@ -2016,6 +2028,15 @@ a {
   margin-top: 2px;
 }
 
+/* A card whose number is a problem worth acting on (garbled or staff-reported answers). */
+.analytics-stat-card.is-flagged {
+  border-left: 3px solid #a15c00;
+}
+
+.role-select {
+  min-width: 132px;
+}
+
 .analytics-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -2025,6 +2046,137 @@ a {
 
 .analytics-block h3 {
   margin-top: 0;
+}
+
+/* ---------- Operations & model routing panels ---------- */
+
+.limits-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px;
+  margin: 10px 0 6px;
+}
+
+.limits-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.limits-form input {
+  width: 120px;
+}
+
+.fallback-list {
+  margin: 10px 0 4px;
+  padding-left: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fallback-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.fallback-list li span:first-child {
+  flex: 1;
+}
+
+.routing-select {
+  min-width: 220px;
+}
+
+.verdict {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+}
+
+.verdict-review {
+  color: #b3261e;
+  border-color: #b3261e;
+}
+
+.verdict-good {
+  color: var(--brand-green);
+  border-color: var(--brand-green);
+}
+
+.quality-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.quality-suggestion {
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--brand-green);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+
+.log-level {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.log-level-error {
+  color: #b3261e;
+}
+
+.log-level-warn {
+  color: #a15c00;
+}
+
+.log-level-info,
+.log-level-debug {
+  color: var(--text-muted);
+}
+
+.admin-table td.data-label {
+  color: var(--text-muted);
+  white-space: nowrap;
+  width: 1%;
+}
+
+/* Language quality caution (chat modal and admin Language section) — honest, not alarming. */
+.language-caution {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-left: 3px solid #a15c00;
+  background: var(--surface-muted);
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+
+.caution-note {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid #a15c00;
+  background: var(--surface-muted);
+  border-radius: 6px;
+  font-size: 12.5px;
 }
 
 .admin-table td.admin-table-empty {
@@ -2532,6 +2684,66 @@ a {
   color: var(--text-muted);
 }
 
+/* The three knowledge bases read as folders: a count pill on the heading, the folder's on-disk name
+   in small muted text, and a note about who may add to it. */
+.kb-section-heading {
+  min-width: 0;
+}
+
+.kb-section-count {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.kb-folder-path {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.kb-folder-name {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-muted);
+  color: var(--text-main);
+}
+
+.kb-section-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.kb-section-note code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-muted);
+  color: var(--text-main);
+  font-size: 11.5px;
+}
+
+/* The admin note is a second line under the upload button, so it stacks under it instead of
+   stretching the header across the page. */
+.kb-section-actions-stacked {
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.kb-section-actions-stacked .kb-section-note {
+  max-width: 250px;
+  text-align: right;
+}
+
 .kb-section-actions {
   display: flex;
   align-items: center;
@@ -2561,6 +2773,13 @@ a {
 @media (max-width: 700px) {
   .kb-section-header {
     flex-direction: column;
+  }
+  /* Stacked under the button on wide screens; left-aligned once the header becomes one column. */
+  .kb-section-actions-stacked {
+    align-items: flex-start;
+  }
+  .kb-section-actions-stacked .kb-section-note {
+    text-align: left;
   }
   .kb-search {
     min-width: 0;
@@ -2742,4 +2961,888 @@ a {
 
 .audit-table tr.audit-warning td {
   color: var(--brand-red);
+}
+
+/* ---------- Chat: reply-language modal ---------- */
+
+.language-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.language-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.language-option:hover {
+  background: var(--surface-muted);
+}
+
+.language-option.is-fixed {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.language-option.is-fixed:hover {
+  background: none;
+}
+
+.language-option input {
+  margin: 2px 0 0;
+  flex-shrink: 0;
+}
+
+.language-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.language-option-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.language-option-hint {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.language-options-loading {
+  padding: 12px 0;
+  font-size: 13.5px;
+  color: var(--text-muted);
+}
+
+.language-fixed-note {
+  margin: 12px 0 0;
+  padding: 9px 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* ---------- Admin portal: reply language & glossary ---------- */
+
+.language-settings-form {
+  max-width: 560px;
+}
+
+.language-settings-form .field {
+  margin-bottom: 14px;
+}
+
+.glossary-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.glossary-add-row select,
+.glossary-add-row input {
+  font: inherit;
+  font-size: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-main);
+  color: var(--text-main);
+}
+
+.glossary-add-row input {
+  flex: 1;
+  min-width: 180px;
+}
+
+.language-save-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.language-saved-note {
+  font-size: 13px;
+  color: var(--brand-green);
+}
+
+/* ---------- Chat: language notices under a reply ----------
+   These sit inside the reply itself, not in a composer note: a warning about a garbled answer has
+   to still be there when the person re-reads the conversation an hour later. */
+
+.language-warning {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid #a15c00;
+  background: var(--surface-muted);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.language-warning-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.45;
+}
+
+.language-warning-line .icon {
+  color: #a15c00;
+  margin-top: 1px;
+}
+
+.language-warning-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.language-warning-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  color: var(--text-main);
+}
+
+.language-warning-btn:hover {
+  background: var(--bubble-user);
+}
+
+.language-warning-btn:disabled,
+.language-warning-btn.is-reported {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.language-unavailable-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link-btn:hover {
+  color: var(--accent-hover);
+}
+
+/* ---------- Chat: "not covered by the bank's policies" web-search note ----------
+   The bank's own policies not answering is a normal, honest outcome rather than a failure, so this
+   note is quiet muted text inside the reply — never styled like the red error banner. It sits under
+   the answer and above the source chips, with any approved-website results as real links. */
+.policy-web-search-note {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.policy-web-search-note-line {
+  margin: 0;
+}
+
+.policy-web-search-note strong {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.policy-web-search-note-results {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.policy-web-search-note-results a {
+  color: var(--accent);
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+.policy-web-search-note-results a:hover {
+  color: var(--accent-hover);
+}
+
+/* Unavailable languages stay visible in the picker with the server's reason, greyed out and
+   unselectable — silently hiding them would make staff think the feature had been removed. */
+.language-option.is-unavailable {
+  cursor: default;
+  opacity: 0.62;
+  background: var(--surface-muted);
+}
+
+.language-option.is-unavailable:hover {
+  background: var(--surface-muted);
+}
+
+/* ---------- Admin portal: Language tab ---------- */
+
+.language-status-note {
+  margin: -8px 0 18px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--brand-green);
+  background: var(--surface-muted);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.language-default-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  font-size: 13px;
+}
+
+.language-default-row label {
+  font-weight: 600;
+}
+
+.language-default-row select {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-main);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 13.5px;
+}
+
+.language-native-name {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.language-locked-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.language-enabled-toggle {
+  width: 16px;
+  height: 16px;
+}
+
+.language-available-reason {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  max-width: 190px;
+}
+
+.language-last-test-badge {
+  margin-right: 6px;
+}
+
+.capability-caution {
+  display: block;
+  margin-top: 4px;
+  max-width: 240px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #a15c00;
+}
+
+.capability-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 18px;
+  margin: 4px 0 6px;
+}
+
+.capability-form .field {
+  margin: 0;
+  min-width: 230px;
+}
+
+.capability-languages {
+  border: none;
+  margin: 0;
+  padding: 0;
+  min-width: 260px;
+}
+
+.capability-languages legend {
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.capability-language-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  min-height: 22px;
+}
+
+.capability-language {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.capability-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.capability-external {
+  color: var(--brand-red);
+}
+
+.capability-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 6px 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.capability-progress-summary {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.capability-progress-row {
+  display: grid;
+  grid-template-columns: 14px minmax(90px, 150px) 1fr 130px;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.capability-progress-language {
+  font-weight: 600;
+}
+
+.capability-progress-label {
+  color: var(--text-muted);
+}
+
+.capability-progress-track {
+  display: block;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.capability-progress-bar {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand-green);
+  transition: width 0.25s ease;
+}
+
+.capability-progress-bar.is-failed {
+  background: #b3261e;
+}
+
+.capability-progress-bar.is-stopped {
+  background: var(--text-muted);
+}
+
+/* The existing Good/Review badges use the dark brand green, which is nearly invisible on a dark
+   background; brighten the text and border there (the same badges are used on Model routing). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .verdict-good {
+    color: #7fd6a4;
+    border-color: #2f7a52;
+  }
+
+  :root:not([data-theme="light"]) .verdict-review {
+    color: #f2a09a;
+    border-color: #8a3a33;
+  }
+}
+
+:root[data-theme="dark"] .verdict-good {
+  color: #7fd6a4;
+  border-color: #2f7a52;
+}
+
+:root[data-theme="dark"] .verdict-review {
+  color: #f2a09a;
+  border-color: #8a3a33;
+}
+
+.capability-spinner {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--brand-green);
+  border-radius: 50%;
+  animation: language-spin 0.8s linear infinite;
+}
+
+@keyframes language-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.capability-status-icon {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.capability-status-icon.is-approved {
+  color: var(--brand-green);
+}
+
+.capability-status-icon.is-failed {
+  color: #b3261e;
+}
+
+.capability-status-icon.is-stopped {
+  color: var(--text-muted);
+}
+
+.capability-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0 4px;
+}
+
+.capability-result {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.capability-result.is-approved {
+  border-left: 3px solid var(--brand-green);
+}
+
+.capability-result.is-failed {
+  border-left: 3px solid #b3261e;
+}
+
+.capability-result-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.capability-result-header h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.capability-result-score {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.capability-check-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.capability-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.capability-check-mark {
+  display: flex;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.capability-check.is-passed .capability-check-mark {
+  color: var(--brand-green);
+}
+
+.capability-check.is-failed .capability-check-mark {
+  color: #b3261e;
+}
+
+.capability-check-detail {
+  color: var(--text-muted);
+}
+
+.terms-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.terms-toolbar .field {
+  margin: 0;
+  min-width: 190px;
+}
+
+.term-edit-input {
+  width: 100%;
+  min-width: 140px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-main);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 13px;
+}
+
+/* ---------- Admin portal: read-only (auditor) mode ----------
+   The auditor role may see every record but change nothing. admin.js disables the mutation controls and
+   intercepts the requests, and the server refuses them too; this banner only makes the reason visible. */
+.admin-readonly-banner {
+  max-width: none;
+  margin: 0 0 16px;
+  background: rgba(161, 92, 0, 0.1);
+  color: #7a4600;
+  border: 1px solid #a15c00;
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+
+:root[data-theme="dark"] .admin-readonly-banner {
+  color: #f0c27a;
+}
+
+.settings-toggle-row.is-readonly {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.control-readonly-disabled {
+  opacity: 0.55;
+}
+
+/* ---------- Admin portal: terminology approval & context ---------- */
+
+.term-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.term-badge.approved {
+  color: var(--brand-green);
+  border-color: var(--brand-green);
+}
+
+.term-badge.pending {
+  color: #a15c00;
+  border-color: #a15c00;
+  background: rgba(161, 92, 0, 0.12);
+}
+
+.term-badge.rejected {
+  color: #b3261e;
+  border-color: #b3261e;
+  background: rgba(179, 38, 30, 0.1);
+}
+
+/* An unapproved term must never read like bank-approved wording: mute the text, keep the actions legible. */
+.term-row.is-unapproved td:not(:last-child) {
+  color: var(--text-muted);
+}
+
+.term-context {
+  display: block;
+  max-width: 320px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.term-meta {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.term-row .term-edit-input {
+  margin-bottom: 4px;
+}
+
+/* ---------- Admin portal: language usage filters, trend and warnings ---------- */
+
+.admin-minor-heading {
+  font-size: 13.5px;
+  font-weight: 600;
+  margin: 20px 0 8px;
+}
+
+.analytics-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin: 4px 0 8px;
+  font-size: 13px;
+}
+
+.analytics-filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+}
+
+.analytics-filters input,
+.analytics-filters select {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-main);
+  color: var(--text-main);
+  font: inherit;
+}
+
+.language-trend {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 124px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-muted);
+  overflow-x: auto;
+}
+
+.language-trend-col {
+  flex: 1 0 22px;
+  min-width: 22px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.language-trend-plot {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.language-trend-bar {
+  width: 100%;
+  max-width: 30px;
+  min-height: 2px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: var(--border);
+  border-radius: 3px 3px 0 0;
+  overflow: hidden;
+}
+
+.language-trend-seg {
+  width: 100%;
+}
+
+.language-trend-seg.garbled {
+  background: #b3261e;
+}
+
+.language-trend-seg.incorrect {
+  background: #d97706;
+}
+
+.language-trend-seg.unclear {
+  background: #eab308;
+}
+
+.language-trend-day {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.language-trend-empty {
+  margin: auto;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.language-events-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.language-events-reason {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  font-size: 12.5px;
+}
+
+.language-events-recurring {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 14px;
+}
+
+.language-events-recurring-item {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid #a15c00;
+  border-radius: 6px;
+  background: var(--surface-muted);
+  font-size: 12.5px;
+}
+
+.language-events-recurring-item.is-none {
+  border-left-color: var(--brand-green);
+}
+
+.language-events-recurring-item strong {
+  font-weight: 600;
+}
+
+/* ---------- Chat: three-category translation feedback ---------- */
+
+.language-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  font-size: 12.5px;
+}
+
+.language-feedback-label {
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+
+.language-feedback-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text-main);
+}
+
+.language-feedback-btn:hover {
+  background: var(--bubble-user);
+}
+
+.language-feedback-btn[aria-pressed="true"] {
+  border-color: var(--brand-green);
+  color: var(--brand-green);
+  font-weight: 600;
+  background: rgba(0, 78, 45, 0.08);
+}
+
+.language-feedback-btn.incorrect[aria-pressed="true"],
+.language-feedback-btn.unclear[aria-pressed="true"] {
+  border-color: #a15c00;
+  color: #a15c00;
+  background: rgba(161, 92, 0, 0.1);
+}
+
+.language-feedback-status {
+  color: var(--brand-green);
+  font-size: 12px;
+}
+
+/* Narrow screens: the capability progress rows stack instead of squeezing the step label. */
+@media (max-width: 720px) {
+  .capability-progress-row {
+    grid-template-columns: 14px 1fr;
+  }
+
+  .capability-progress-track {
+    grid-column: 2;
+  }
+}
+
+/* Offering a language without a passed test: an explicit, labeled choice. */
+.language-override-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
 }

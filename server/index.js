@@ -7,6 +7,9 @@ if (fs.existsSync(envPath)) {
   process.loadEnvFile(envPath);
 }
 
+const logger = require('./logger');
+logger.captureConsole();
+
 const express = require('express');
 const session = require('express-session');
 const { ensureCert, localIPv4Addresses } = require('./certs');
@@ -14,6 +17,8 @@ const { runRetentionSweep } = require('./retention');
 const { warmUpDefaultModel } = require('./ollama');
 const { SqliteSessionStore } = require('./sessionStore');
 const { startBackgroundIndexing } = require('./embeddings');
+const knowledgeFolders = require('./knowledgeFolders');
+const monitor = require('./monitor');
 
 const authRoutes = require('./routes/auth');
 const conversationRoutes = require('./routes/conversations');
@@ -21,27 +26,37 @@ const chatRoutes = require('./routes/chat');
 const modelRoutes = require('./routes/models');
 const documentRoutes = require('./routes/documents');
 const adminRoutes = require('./routes/admin');
+const adminLanguageRoutes = require('./routes/adminLanguage');
 const imagegenRoutes = require('./routes/imagegen');
 const settingsRoutes = require('./routes/settings');
 const speechRoutes = require('./routes/speech');
 const promptRoutes = require('./routes/prompts');
 const memoryRoutes = require('./routes/memories');
 const providerRoutes = require('./routes/providers');
+const languageRoutes = require('./routes/languages');
 
 // Last-resort safety net: every route handler is already wrapped (see middleware/asyncHandler),
 // but this catches anything that still slips through — without it, an unhandled rejection
 // anywhere would silently crash the whole process (and every user's session with it).
 process.on('unhandledRejection', (err) => {
-  console.error('Unhandled promise rejection:', err);
+  logger.error('Unhandled promise rejection', logger.errorFields(err instanceof Error ? err : new Error(String(err))));
 });
 process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
+  logger.error('Uncaught exception', logger.errorFields(err));
 });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
+// Health probe for Docker, uptime monitors and the Windows service. Public (no login, no session)
+// and cheap: ?deep=1 also checks Ollama, ?strict=1 turns "degraded" into an HTTP 503.
+app.get('/health', async (req, res) => {
+  const { httpStatus, body } = await monitor.healthCheck({ deep: req.query.deep === '1', strict: req.query.strict === '1' });
+  res.status(httpStatus).set('Cache-Control', 'no-store').json(body);
+});
+
+app.use(logger.requestLogger);
 app.use(express.json({ limit: '1mb' }));
 
 app.use(
@@ -67,12 +82,14 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/models', modelRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/admin/providers', providerRoutes);
+app.use('/api/admin/language', adminLanguageRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/imagegen', imagegenRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/speech', speechRoutes);
 app.use('/api/prompts', promptRoutes);
 app.use('/api/memories', memoryRoutes);
+app.use('/api/languages', languageRoutes);
 
 // Session check used by the frontend to gate the chat page
 app.get('/api/session', (req, res) => {
@@ -128,6 +145,10 @@ ensureCert()
       } else if (HOST !== '127.0.0.1' && HOST !== 'localhost') {
         console.log(`  On the network: https://${HOST}:${PORT}`);
       }
+      logger.info('AMERB AI started', { port: PORT, host: HOST, pid: process.pid, node: process.versions.node, logFile: logger.LOG_FILE });
+      monitor.startSampler();
+      // Keeps data/knowledge/<base>/ folders in step with the database (one copy per knowledge base).
+      knowledgeFolders.startBackgroundSync();
       runRetentionSweep();
       setInterval(runRetentionSweep, RETENTION_SWEEP_INTERVAL_MS).unref();
       if (!process.env.AMERB_SKIP_WARMUP) {
