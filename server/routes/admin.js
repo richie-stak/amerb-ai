@@ -10,7 +10,7 @@ const { requireAdmin, requireAdminOrAuditor } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const { DEPARTMENTS } = require('../departments');
 const { destroyUserSessions } = require('../sessionStore');
-const { auditAdminChanges, queryAudit, ACTION_GROUPS } = require('../audit');
+const { logAudit, auditAdminChanges, queryAudit, ACTION_GROUPS } = require('../audit');
 
 // Excludes visually-ambiguous characters (0/O, 1/l/I) so a temporary password read aloud or typed
 // from a screen doesn't trip people up.
@@ -109,7 +109,7 @@ router.post('/users/:id/reset-password', asyncHandler(async (req, res) => {
   if (!target) return res.status(404).json({ error: 'User not found' });
 
   const tempPassword = generateTempPassword();
-  const hash = await bcrypt.hash(tempPassword, 10);
+  const hash = await bcrypt.hash(tempPassword, 12);
   // Also clears any login lockout — an admin resetting the password is already restoring access,
   // so a stale lock from the account's earlier failed attempts shouldn't keep blocking it.
   db.prepare('UPDATE users SET password_hash = ?, failed_login_count = 0, locked_until = NULL WHERE id = ?').run(
@@ -151,7 +151,9 @@ router.post('/models/pull', asyncHandler(async (req, res) => {
   });
 
   const controller = new AbortController();
-  req.on('close', () => controller.abort());
+  res.on('close', () => {
+    if (!res.writableEnded) controller.abort();
+  });
 
   try {
     const ollamaRes = await fetch(`${OLLAMA_URL}/api/pull`, {
@@ -216,7 +218,9 @@ router.post('/models/house', asyncHandler(async (req, res) => {
   });
 
   const controller = new AbortController();
-  req.on('close', () => controller.abort());
+  res.on('close', () => {
+    if (!res.writableEnded) controller.abort();
+  });
 
   try {
     const ollamaRes = await fetch(`${OLLAMA_URL}/api/create`, {
@@ -486,6 +490,9 @@ router.get('/analytics', (req, res) => {
 // while the server keeps writing to the live database (WAL mode allows a concurrent reader) —
 // rather than copying the raw file, which could grab it mid-write and produce a corrupt copy.
 router.get('/backup', asyncHandler(async (req, res) => {
+  // A GET, so the automatic audit middleware skips it — but this hands over every conversation,
+  // password hash and encrypted provider key in the bank, so it is recorded explicitly.
+  logAudit(req, 'admin.backup_downloaded', { note: 'full database snapshot' });
   const tmpPath = path.join(os.tmpdir(), `amerb-ai-backup-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.sqlite`);
   const source = new DatabaseSync(db.DB_PATH, { readOnly: true });
   try {
@@ -594,7 +601,7 @@ router.post('/users/import', asyncHandler(async (req, res) => {
     }
 
     const tempPassword = generateTempPassword();
-    const passwordHash = await bcrypt.hash(tempPassword, 10);
+    const passwordHash = await bcrypt.hash(tempPassword, 12);
     db.prepare('INSERT INTO users (username, email, password_hash, department) VALUES (?, ?, ?, ?)').run(
       username,
       email,

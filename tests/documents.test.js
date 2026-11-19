@@ -19,7 +19,7 @@ before(async () => {
   const financeSignup = await financeUser.post('/api/auth/signup', {
     username: 'financeuser',
     email: 'financeuser@amenfimanbank.com',
-    password: 'password123',
+    password: 'password12345',
     department: 'Finance',
   });
   const financeData = await financeSignup.json();
@@ -29,13 +29,13 @@ before(async () => {
   await hrUser.post('/api/auth/signup', {
     username: 'hruser',
     email: 'hruser@amenfimanbank.com',
-    password: 'password123',
+    password: 'password12345',
     department: 'HR',
   });
   await hrUser.post('/api/auth/logout');
 
-  await financeUser.post('/api/auth/login', { identifier: 'financeuser', password: 'password123' });
-  await hrUser.post('/api/auth/login', { identifier: 'hruser', password: 'password123' });
+  await financeUser.post('/api/auth/login', { identifier: 'financeuser', password: 'password12345' });
+  await hrUser.post('/api/auth/login', { identifier: 'hruser', password: 'password12345' });
 
   const db = server.openDb();
   const financeUserId = financeData.user.id;

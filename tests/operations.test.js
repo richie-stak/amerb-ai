@@ -25,7 +25,7 @@ async function signup(username, department = 'Credit') {
   const res = await client.post('/api/auth/signup', {
     username,
     email: `${username}@amenfimanbank.com`,
-    password: 'password123',
+    password: 'password12345',
     department,
   });
   assert.equal(res.status, 200, await res.clone().text());

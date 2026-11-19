@@ -59,8 +59,8 @@ COPY --chown=node:node eng.traineddata ./eng.traineddata
 #   certs/  self-signed HTTPS certificate
 #   logs/   rotating structured log (LOG_DIR)
 #   .cache  Whisper (voice input) model, downloaded once from Hugging Face on first use
-RUN mkdir -p /app/data /app/certs /app/logs /app/node_modules/@xenova/transformers/.cache \
- && chown node:node /app/data /app/certs /app/logs /app/node_modules/@xenova/transformers/.cache
+RUN mkdir -p /app/data /app/certs /app/logs /app/node_modules/@huggingface/transformers/.cache \
+ && chown node:node /app/data /app/certs /app/logs /app/node_modules/@huggingface/transformers/.cache
 
 USER node
 EXPOSE 3000

@@ -435,7 +435,11 @@ async function runAssistantTurn(
   if (policyFallback) sendEvent(res, 'policy-web-search', policyFallback);
 
   const controller = new AbortController();
-  res.req.on('close', () => controller.abort());
+  // The response's own 'close' is the one that means the browser went away mid-answer; finishing
+  // normally must not look like a cancellation.
+  res.on('close', () => {
+    if (!res.writableEnded) controller.abort();
+  });
 
   let full = '';
   let thinkingFull = '';
@@ -1071,7 +1075,9 @@ router.post('/quick', asyncHandler(async (req, res) => {
 
   await withModelSlot(res, user, model, async () => {
     const controller = new AbortController();
-    req.on('close', () => controller.abort());
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
 
     try {
       await llm.streamChat(model, {

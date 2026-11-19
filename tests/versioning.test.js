@@ -17,7 +17,7 @@ before(async () => {
   const signup = await client.post('/api/auth/signup', {
     username: 'versionuser',
     email: 'versionuser@amenfimanbank.com',
-    password: 'password123',
+    password: 'password12345',
     department: 'IT',
   });
   const { user } = await signup.json();

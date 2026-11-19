@@ -35,7 +35,7 @@ before(async () => {
     await client.post('/api/auth/signup', {
       username,
       email: `${username}@amenfimanbank.com`,
-      password: 'password123',
+      password: 'password12345',
       department: 'Credit',
     });
   }

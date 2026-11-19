@@ -81,9 +81,13 @@ class SqliteSessionStore extends session.Store {
 }
 
 // Signs a user out everywhere — used when an admin deletes an account or resets its password.
-function destroyUserSessions(userId) {
+// Signs a person out everywhere by deleting their stored sessions. `exceptSid` keeps the session that
+// is doing the signing out (a self-service password change shouldn't log the person out of the window
+// they are standing in).
+function destroyUserSessions(userId, { exceptSid = null } = {}) {
   for (const row of db.prepare('SELECT sid, sess FROM sessions').all()) {
     try {
+      if (row.sid === exceptSid) continue;
       if (JSON.parse(row.sess).userId === userId) db.prepare('DELETE FROM sessions WHERE sid = ?').run(row.sid);
     } catch {
       /* skip unreadable rows */

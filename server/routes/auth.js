@@ -1,11 +1,13 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const crypto = require('node:crypto');
 const db = require('../db');
 const asyncHandler = require('../middleware/asyncHandler');
 const { logAudit } = require('../audit');
 const { DEPARTMENTS } = require('../departments');
 const L = require('../languages');
 const languageSettings = require('../languageSettings');
+const logger = require('../logger');
 
 const router = express.Router();
 
@@ -14,6 +16,26 @@ const ALLOWED_EMAIL_DOMAIN = 'amenfimanbank.com';
 
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
+const BCRYPT_COST = 12;
+// 12 characters is the lowest the bank's own guidance allows without a second factor; length matters
+// more than forced symbols, which mostly produce Password1!-style passwords.
+const MIN_PASSWORD_LENGTH = 12;
+
+// Names that must not belong to an ordinary account: they look official, and one of them used to be
+// promoted to administrator automatically on startup.
+const RESERVED_USERNAMES = new Set(['admin', 'administrator', 'root', 'system', 'sysadmin', 'superuser']);
+
+// A real bcrypt hash of a throwaway value, compared against when an account does not exist, so a wrong
+// username takes the same time as a wrong password (no account enumeration by stopwatch).
+const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), BCRYPT_COST);
+
+// Whether this signup creates the bank's first administrator: only when the address matches the one an
+// administrator deliberately named in the environment (BOOTSTRAP_ADMIN_EMAIL). The e-mail is unique, so
+// this can only ever apply to one account.
+function isBootstrapAdmin(email) {
+  const wanted = String(process.env.BOOTSTRAP_ADMIN_EMAIL || '').trim().toLowerCase();
+  return Boolean(wanted) && email.trim().toLowerCase() === wanted;
+}
 
 // SQLite's datetime('now') is UTC with no 'Z' suffix — Date can't tell that from local time
 // unless told, the same fix already used for created_at timestamps elsewhere in this app.
@@ -50,14 +72,17 @@ router.post('/signup', asyncHandler(async (req, res) => {
     return res.status(403).json({ error: `Registration is restricted to @${ALLOWED_EMAIL_DOMAIN} email addresses` });
   }
 
-  if (typeof password !== 'string' || password.length < 8) {
-    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
+    return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` });
   }
   if (typeof department !== 'string' || !DEPARTMENTS.includes(department)) {
     return res.status(400).json({ error: 'Select a valid department' });
   }
 
   const cleanUsername = username.trim();
+  if (RESERVED_USERNAMES.has(cleanUsername.toLowerCase())) {
+    return res.status(400).json({ error: 'That username is reserved. Choose another one.' });
+  }
 
   const existing = db
     .prepare('SELECT id FROM users WHERE username = ? OR email = ?')
@@ -66,14 +91,20 @@ router.post('/signup', asyncHandler(async (req, res) => {
     return res.status(409).json({ error: 'Username or email is already taken' });
   }
 
-  const passwordHash = await bcrypt.hash(password, 12);
+  const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
 
+  // The very first administrator is created deliberately (BOOTSTRAP_ADMIN_EMAIL), never by registering
+  // a particular name — that rule used to exist and was an escalation path.
+  const role = isBootstrapAdmin(cleanEmail) ? 'admin' : 'user';
   const result = db
-    .prepare('INSERT INTO users (username, email, password_hash, department) VALUES (?, ?, ?, ?)')
-    .run(cleanUsername, cleanEmail, passwordHash, department);
+    .prepare('INSERT INTO users (username, email, password_hash, department, role) VALUES (?, ?, ?, ?, ?)')
+    .run(cleanUsername, cleanEmail, passwordHash, department, role);
 
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
-  logAudit(req, 'auth.signup', { email: user.email }, user);
+  logAudit(req, 'auth.signup', { email: user.email, role }, user);
+  if (role === 'admin') {
+    logger.warn('Bootstrapped an administrator account from BOOTSTRAP_ADMIN_EMAIL', { username: user.username });
+  }
 
   req.session.regenerate((err) => {
     if (err) return res.status(500).json({ error: 'Could not start session' });
@@ -95,6 +126,9 @@ router.post('/login', asyncHandler(async (req, res) => {
     .get(identifier.trim(), clean);
 
   if (!user) {
+    // Burn the same time a real comparison would, so response time does not reveal whether the
+    // account exists.
+    await bcrypt.compare(password, DUMMY_HASH);
     logAudit(req, 'auth.login_failed', { identifier: identifier.trim(), reason: 'unknown account' }, null);
     return res.status(401).json({ error: 'Invalid username/email or password' });
   }
@@ -102,11 +136,11 @@ router.post('/login', asyncHandler(async (req, res) => {
   if (user.locked_until) {
     const lockedUntil = parseUtc(user.locked_until);
     if (lockedUntil > new Date()) {
-      const minutesLeft = Math.ceil((lockedUntil - new Date()) / 60000);
+      // Same wording as a wrong password: "this account exists and is locked" is exactly what an
+      // attacker wants to learn. The administrator sees the real reason in the audit log.
+      await bcrypt.compare(password, DUMMY_HASH);
       logAudit(req, 'auth.login_failed', { reason: 'account locked' }, user);
-      return res
-        .status(429)
-        .json({ error: `Too many failed attempts. Try again in ${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}.` });
+      return res.status(401).json({ error: 'Invalid username/email or password' });
     }
     // Lock has expired — clear it before continuing so a correct password on this attempt works.
     db.prepare('UPDATE users SET locked_until = NULL, failed_login_count = 0 WHERE id = ?').run(user.id);
@@ -115,18 +149,18 @@ router.post('/login', asyncHandler(async (req, res) => {
 
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) {
-    const failedCount = (user.failed_login_count || 0) + 1;
+    // The count is incremented in the database rather than read-modify-written in JavaScript: parallel
+    // guesses used to read the same value, so the lockout never fired.
+    const counted = db
+      .prepare('UPDATE users SET failed_login_count = failed_login_count + 1 WHERE id = ? RETURNING failed_login_count')
+      .get(user.id);
+    const failedCount = counted ? counted.failed_login_count : 1;
     if (failedCount >= MAX_FAILED_LOGIN_ATTEMPTS) {
-      db.prepare(`UPDATE users SET failed_login_count = ?, locked_until = datetime('now', '+${LOCKOUT_MINUTES} minutes') WHERE id = ?`).run(
-        failedCount,
-        user.id
-      );
+      db.prepare(`UPDATE users SET locked_until = datetime('now', '+${LOCKOUT_MINUTES} minutes') WHERE id = ?`).run(user.id);
       logAudit(req, 'auth.account_locked', { failedAttempts: failedCount }, user);
-      return res
-        .status(429)
-        .json({ error: `Too many failed attempts. Account locked for ${LOCKOUT_MINUTES} minutes.` });
+      logger.warn('Account locked after repeated failed sign-ins', { username: user.username, ip: req.ip });
+      return res.status(401).json({ error: 'Invalid username/email or password' });
     }
-    db.prepare('UPDATE users SET failed_login_count = ? WHERE id = ?').run(failedCount, user.id);
     logAudit(req, 'auth.login_failed', { reason: 'wrong password', failedAttempts: failedCount }, user);
     return res.status(401).json({ error: 'Invalid username/email or password' });
   }
@@ -217,8 +251,8 @@ router.patch('/me/password', asyncHandler(async (req, res) => {
   if (typeof currentPassword !== 'string' || typeof newPassword !== 'string') {
     return res.status(400).json({ error: 'Current and new password are required' });
   }
-  if (newPassword.length < 8) {
-    return res.status(400).json({ error: 'New password must be at least 8 characters' });
+  if (newPassword.length < MIN_PASSWORD_LENGTH) {
+    return res.status(400).json({ error: `New password must be at least ${MIN_PASSWORD_LENGTH} characters` });
   }
 
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
@@ -227,9 +261,14 @@ router.patch('/me/password', asyncHandler(async (req, res) => {
   const ok = await bcrypt.compare(currentPassword, user.password_hash);
   if (!ok) return res.status(401).json({ error: 'Current password is incorrect' });
 
-  const passwordHash = await bcrypt.hash(newPassword, 12);
+  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, user.id);
   logAudit(req, 'auth.password_changed', {}, user);
+  // Changing a password because it may have been seen is pointless if the sessions opened with the
+  // old one keep working — so every other session is signed out, including ones on other PCs.
+  const { destroyUserSessions } = require('../sessionStore');
+  const currentSid = req.sessionID;
+  destroyUserSessions(user.id, { exceptSid: currentSid });
   res.json({ ok: true });
 }));
 

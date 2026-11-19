@@ -201,6 +201,62 @@ The first account is not automatically an admin — promote your first admin man
 - **@-mention a document** — typing `@` in the composer brings up an autocomplete of documents visible to you (your department's uploads, plus bank-wide ones); picking one attaches it to the message the same way the paperclip button does.
 - **Voice input** (mic button in the composer) — speech-to-text runs entirely locally via a small Whisper model (`@xenova/transformers`, ONNX + WASM, no native build step). The model itself (~40MB) downloads once from Hugging Face on first use, the same one-time-download-then-fully-offline pattern as `ollama pull` — after that, transcription never leaves the machine, unlike the browser's own built-in speech recognition, which would send audio to a cloud provider.
 
+## Production hardening
+
+This section is the checklist the app was hardened against; it is not optional reading if the app is
+exposed to the bank's network.
+
+**First administrator.** Nobody is an administrator automatically. Set `BOOTSTRAP_ADMIN_EMAIL` in
+`.env` to the address that should own the system, sign up with it once, then remove the setting. (Before
+this rule existed, any account registering the username `admin` was promoted on the next restart — that
+escalation path is gone, and `admin`/`administrator`/`root`/`system` are reserved names.)
+
+**Sign-in.** Passwords are 12 characters minimum; bcrypt cost 12 throughout. Successful sign-in rotates
+the session id (no fixation), and changing your own password signs out every other session. Five failed
+attempts lock an account — the counter is incremented atomically in SQLite, so parallel guessing cannot
+slip past it — and every failure returns exactly the same message and takes the same time whether the
+account exists or not (no enumeration). A per-address throttle (30 attempts per 15 minutes) sits in front
+of sign-in, sign-up and password change; `AUTH_RATE_MAX` changes it.
+
+**Behind a proxy.** Set `TRUST_PROXY` (see `.env.example`) or every audit entry, lockout and rate limit
+will see the proxy's address instead of the person's.
+
+**Response headers.** Every response carries a Content-Security-Policy (`script-src 'self'` plus the
+hashes of the app's own inline theme scripts — not `unsafe-inline`), `X-Frame-Options: DENY`,
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, HSTS, and a Permissions-Policy that
+allows only the microphone. State-changing requests from another site are refused as well as being
+protected by the SameSite cookie.
+
+**Uploads and stored files.** A file's type is decided by the app from its extension/bytes — never from
+the upload's own Content-Type header — and only PDFs and images are ever served inline. Everything else
+downloads as an attachment, and file responses additionally carry `CSP: sandbox`, `nosniff` and
+`frame-ancestors 'self'` so a crafted document cannot run script in the app's origin. HTML previews of
+Word/Excel files are stripped of scripts, event handlers and `javascript:` links. Uploads are throttled
+per person (40 per 15 minutes) and capped at 20 MB × 5 files, and a too-large upload answers 413 rather
+than an opaque 500.
+
+**Web tools.** `fetch_url` only reaches domains an administrator approves and refuses private, loopback,
+link-local, carrier-grade-NAT, benchmarking, mapped-IPv6 and multicast addresses (checked after DNS
+resolution, with the connection pinned to the checked IP). Web search is off by default; when the
+bank's own documents cannot answer a policy question, only the approved websites are searched and the
+reply says which ones.
+
+**Operations.** `SIGTERM` drains in-flight answers before exiting (10 s cap) and an uncaught exception
+shuts the process down deliberately, so the service restarts a clean one instead of carrying on in an
+unknown state. `/health` reports database and Ollama state. Errors are logged in full and returned to
+the browser as a plain message, never a stack trace. Downloading the whole database is recorded in the
+audit log.
+
+**Dependencies.** `npm audit --omit=dev` is expected to be clean apart from the advisory on
+`image-size` (used only by `pptxgenjs` when generating presentations; the app never parses untrusted
+images through it). Run `npm audit` after every dependency change and before each release.
+
+**Known limitations, documented rather than hidden.** Voice input cannot load on a Windows server whose
+own `onnxruntime.dll` shadows the speech model's runtime — the app reports it and typing keeps working
+(set `SPEECH_DISABLED=1` to hide the microphone). Twi and Ga answers depend entirely on the model and are
+gated behind capability tests (see `docs/LANGUAGES.md`). Media and documents are stored inside the SQLite
+database, which is not encrypted at rest — protect the machine and the backups accordingly.
+
 ## How it works
 
 - **Backend**: Express server (`server/`) — auth, sessions, conversations, document upload/parsing, retrieval, and proxying chat/model-management requests to Ollama with streaming (Server-Sent Events).

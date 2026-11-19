@@ -293,18 +293,30 @@ function runCode(code) {
 }
 
 function isPrivateOrReservedIp(ip) {
-  if (net.isIPv4(ip)) {
-    const [a, b] = ip.split('.').map(Number);
-    if (a === 10 || a === 127 || a === 0) return true;
+  let value = String(ip || '').trim();
+  // An IPv4-mapped IPv6 address ("::ffff:10.0.0.5") reaches the internal IPv4 service, so unwrap it
+  // before deciding — otherwise the reserved-range check below is bypassed.
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(value);
+  if (mapped) value = mapped[1];
+
+  if (net.isIPv4(value)) {
+    const [a, b, c] = value.split('.').map(Number);
+    if (a === 0 || a === 10 || a === 127) return true;
     if (a === 169 && b === 254) return true;
     if (a === 172 && b >= 16 && b <= 31) return true;
     if (a === 192 && b === 168) return true;
+    if (a === 192 && b === 0 && c === 0) return true; // 192.0.0.0/24 IETF protocol assignments
+    if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 carrier-grade NAT
+    if (a >= 224) return true; // multicast, reserved, broadcast
     return false;
   }
-  if (net.isIPv6(ip)) {
-    const lower = ip.toLowerCase();
-    if (lower === '::1') return true;
+  if (net.isIPv6(value)) {
+    const lower = value.toLowerCase();
+    if (lower === '::' || lower === '::1') return true;
     if (lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd')) return true;
+    if (lower.startsWith('fec0:') || lower.startsWith('ff')) return true; // site-local, multicast
+    if (lower.startsWith('2001:db8')) return true; // documentation range
     return false;
   }
   return true; // unrecognized format — treat as unsafe
@@ -931,4 +943,4 @@ function toolDefs() {
   return isExchangeRateEnabled() ? [...TOOL_DEFS, EXCHANGE_RATE_TOOL] : TOOL_DEFS;
 }
 
-module.exports = { TOOL_DEFS, toolDefs, executeTool, webSearch };
+module.exports = { TOOL_DEFS, toolDefs, executeTool, webSearch, isPrivateOrReservedIp };

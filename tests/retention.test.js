@@ -15,7 +15,7 @@ before(async () => {
   const signupRes = await admin.post('/api/auth/signup', {
     username: 'retentionadmin',
     email: 'retentionadmin@amenfimanbank.com',
-    password: 'password123',
+    password: 'password12345',
     department: 'IT',
   });
   const signupData = await signupRes.json();
@@ -26,7 +26,7 @@ before(async () => {
   db.close();
 
   await admin.post('/api/auth/logout');
-  await admin.post('/api/auth/login', { identifier: 'retentionadmin', password: 'password123' });
+  await admin.post('/api/auth/login', { identifier: 'retentionadmin', password: 'password12345' });
 });
 
 after(async () => {

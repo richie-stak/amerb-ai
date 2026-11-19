@@ -17,7 +17,7 @@ test('signup rejects an email outside the bank domain', async () => {
   const res = await client.post('/api/auth/signup', {
     username: 'outsider',
     email: 'outsider@gmail.com',
-    password: 'password123',
+    password: 'password12345',
     department: 'IT',
   });
   assert.equal(res.status, 403);
@@ -28,7 +28,7 @@ test('signup succeeds with a valid bank email and the account can log in', async
   const signupRes = await client.post('/api/auth/signup', {
     username: 'testuser1',
     email: 'testuser1@amenfimanbank.com',
-    password: 'password123',
+    password: 'password12345',
     department: 'IT',
   });
   assert.equal(signupRes.status, 200);
@@ -37,7 +37,7 @@ test('signup succeeds with a valid bank email and the account can log in', async
 
   const loginRes = await client.post('/api/auth/login', {
     identifier: 'testuser1',
-    password: 'password123',
+    password: 'password12345',
   });
   assert.equal(loginRes.status, 200);
   const data = await loginRes.json();
@@ -59,10 +59,10 @@ test('account locks after 5 failed login attempts, and the correct password is r
     const res = await client.post('/api/auth/login', { identifier: 'lockouttest', password: 'wrongpassword' });
     lastStatus = res.status;
   }
-  assert.equal(lastStatus, 429, 'the 5th failed attempt should lock the account');
+  assert.equal(lastStatus, 401, 'failures stay indistinguishable from a wrong password');
 
   const correctAttempt = await client.post('/api/auth/login', { identifier: 'lockouttest', password: 'correctpassword' });
-  assert.equal(correctAttempt.status, 429, 'a correct password must still be rejected while locked');
+  assert.equal(correctAttempt.status, 401, 'a correct password must still be rejected while locked');
 });
 
 test('an admin resetting a locked account\'s password also clears the lock', async () => {
@@ -75,12 +75,12 @@ test('an admin resetting a locked account\'s password also clears the lock', asy
     await admin.post('/api/auth/signup', {
       username: 'testadmin1',
       email: 'testadmin1@amenfimanbank.com',
-      password: 'password123',
+      password: 'password12345',
       department: 'IT',
     });
     db.prepare(`UPDATE users SET role = 'admin' WHERE username = 'testadmin1'`).run();
     await admin.post('/api/auth/logout');
-    await admin.post('/api/auth/login', { identifier: 'testadmin1', password: 'password123' });
+    await admin.post('/api/auth/login', { identifier: 'testadmin1', password: 'password12345' });
 
     const resetRes = await admin.post(`/api/admin/users/${locked.id}/reset-password`);
     assert.equal(resetRes.status, 200);

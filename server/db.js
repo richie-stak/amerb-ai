@@ -284,8 +284,10 @@ if (!columnExists('users', 'locked_until')) {
   }
 }
 
-// Grandfather in the original local admin account created before roles existed.
-db.prepare(`UPDATE users SET role = 'admin' WHERE username = 'admin' AND role != 'admin'`).run();
+// There is deliberately no "username admin becomes an admin" rule here any more. It used to
+// grandparent the original account, but it also meant anyone who registered the name "admin" was
+// promoted on the next restart, and that demoting that account never stuck. The first administrator is
+// created explicitly instead — see BOOTSTRAP_ADMIN_EMAIL in routes/auth.js and the README.
 
 // Runs after the table rebuilds above, which recreate `documents` with a fixed column list.
 // Personal documents (chat attachments, AI-generated files, fetched web pages) belong to the one

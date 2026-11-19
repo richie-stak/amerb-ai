@@ -13,7 +13,7 @@ async function signup(client, name) {
   const res = await client.post('/api/auth/signup', {
     username: name,
     email: `${name}@amenfimanbank.com`,
-    password: 'password123',
+    password: 'password12345',
     department: 'Credit',
   });
   return (await res.json()).user;

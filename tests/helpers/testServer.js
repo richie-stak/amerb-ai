@@ -72,6 +72,9 @@ async function spawnServer(dbPath, port, extraEnv = {}) {
       // Tests must never quietly reach this machine's real Ollama through the model-fallback path
       // (a test that expects a failure would then run a real model and take a minute).
       AMERB_DEFAULT_FALLBACK: 'off',
+      // The suite creates far more accounts and sign-ins than a person would; the auth throttle is
+      // tested on its own in security.test.js.
+      AUTH_RATE_MAX: '100000',
       // Bind IPv4 loopback only, and talk to 127.0.0.1 rather than localhost: on Windows a
       // connection attempt to ::1 can occasionally hang instead of being refused, which made
       // tests fail with a 10-second connect timeout for no real reason.

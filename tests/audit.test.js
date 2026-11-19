@@ -23,7 +23,7 @@ before(async () => {
     (await (await client.post('/api/auth/signup', {
       username,
       email: `${username}@amenfimanbank.com`,
-      password: 'password123',
+      password: 'password12345',
       department: 'Credit',
     })).json()).user;
   ids.admin = (await signup(admin, 'auditadmin')).id;
@@ -46,7 +46,7 @@ test('sign-ups, failed sign-ins and sign-ins are recorded', async () => {
   const outsider = makeClient(server.baseUrl);
   await outsider.post('/api/auth/login', { identifier: 'auditstaff', password: 'wrong-password' });
   await outsider.post('/api/auth/login', { identifier: 'nobody-here', password: 'whatever1' });
-  await outsider.post('/api/auth/login', { identifier: 'auditstaff', password: 'password123' });
+  await outsider.post('/api/auth/login', { identifier: 'auditstaff', password: 'password12345' });
 
   const rows = await audit('?action=auth');
   const actions = rows.map((r) => `${r.action}:${r.username || r.details.identifier}`);
@@ -90,7 +90,7 @@ test('admin changes are recorded, and passwords never are', async () => {
   assert.ok(rows.some((r) => r.details.path === `/api/admin/users/${ids.staff}` && r.details.body.department === 'Loans'));
   assert.ok(rows.some((r) => r.details.path === `/api/admin/users/${ids.staff}/reset-password`));
   const everything = JSON.stringify(await audit('?limit=1000'));
-  assert.ok(!everything.includes('password123'), 'no password in the log');
+  assert.ok(!everything.includes('password12345'), 'no password in the log');
   assert.ok(!everything.includes('sk-should-never-be-logged'), 'no API key in the log');
 });
 

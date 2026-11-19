@@ -7,6 +7,7 @@ const { extractText, chunkText, isImageFile, imageMimeType } = require('../docum
 const { BANKWIDE_DEPARTMENT, DEPARTMENTS } = require('../departments');
 const { SCOPES, scopeOf, canAccessDoc, canDeleteDoc, searchableWhere } = require('../documentAccess');
 const knowledgeFolders = require('../knowledgeFolders');
+const logger = require('../logger');
 const { indexPendingChunks } = require('../embeddings');
 const { logAudit } = require('../audit');
 
@@ -24,6 +25,15 @@ const ACCEPTED_EXTENSIONS = new Set([
 const PREVIEWABLE_KIND_BY_EXT = { '.pdf': 'pdf', '.docx': 'docx', '.xlsx': 'xlsx', '.xls': 'xlsx', '.xlsm': 'xlsx' };
 const MAX_PREVIEW_FILE_BYTES = 15 * 1024 * 1024;
 
+// Uploading is the most expensive thing a staff account can do (five files of up to 20 MB, parsed and
+// indexed in-process), so it is throttled per person as well as per request.
+const uploadThrottle = require('../security').keyedRateLimit({
+  key: (req) => (req.session?.userId ? `upload:${req.session.userId}` : 'anon'),
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  message: 'Too many uploads in a short time. Wait a few minutes, then try again.',
+});
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024, files: 5 },
@@ -39,6 +49,51 @@ const upload = multer({
 
 function currentUser(req) {
   return db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
+}
+
+// How a stored document may be served. The uploader's own Content-Type header is never trusted: a file
+// called "policy.pdf" whose multipart part claimed text/html used to be served as an HTML page from the
+// app's origin, which is a stored-XSS route into other staff members' sessions. The type is derived
+// from the app's own `kind` and, for images, from the bytes themselves.
+const MIME_BY_KIND = {
+  pdf: 'application/pdf',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  webpage: 'text/plain; charset=utf-8',
+  text: 'text/plain; charset=utf-8',
+};
+
+function imageMimeFromBytes(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return 'application/octet-stream';
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) return 'image/jpeg';
+  if (buffer.toString('ascii', 0, 4) === 'GIF8') return 'image/gif';
+  if (buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  if (buffer[0] === 0x42 && buffer[1] === 0x4d) return 'image/bmp';
+  return 'application/octet-stream';
+}
+
+// What to send back for a document: { type, inline }. Only PDFs and images may render in the browser;
+// everything else is an attachment, so no stored file is ever interpreted as a page.
+function servingInfo(doc, buffer) {
+  if (doc.kind === 'image') {
+    const type = imageMimeFromBytes(buffer);
+    return { type, inline: type.startsWith('image/'), unrenderable: !type.startsWith('image/') };
+  }
+  const type = MIME_BY_KIND[doc.kind] || 'application/octet-stream';
+  return { type, inline: doc.kind === 'pdf' };
+}
+
+// Headers for a response that carries a user-uploaded file: never let it run scripts, never let it be
+// embedded anywhere but this app, and never let the browser sniff it into something else.
+function setDocumentHeaders(res, { type, inline }) {
+  res.setHeader('Content-Type', type);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox; frame-ancestors 'self'");
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  return inline;
 }
 
 const DOC_COLUMNS = `d.id, d.user_id, d.filename, d.department, d.is_personal, d.mime_type, d.kind, d.char_count,
@@ -112,7 +167,7 @@ function uploadTarget(user, body) {
   return { department: user.department || 'General', isPersonal: true };
 }
 
-router.post('/', upload.array('files', 5), asyncHandler(async (req, res) => {
+router.post('/', uploadThrottle, upload.array('files', 5), asyncHandler(async (req, res) => {
   const user = currentUser(req);
   if (!req.files || !req.files.length) {
     return res.status(400).json({ error: 'No files were uploaded' });
@@ -163,7 +218,7 @@ router.post('/', upload.array('files', 5), asyncHandler(async (req, res) => {
           targetDepartment,
           target.isPersonal ? 1 : 0,
           file.originalname,
-          isImage ? imageMimeType(file.originalname, file.mimetype) : file.mimetype || '',
+          isImage ? imageMimeFromBytes(file.buffer) : MIME_BY_KIND[kind] || 'application/octet-stream',
           kind,
           isImage ? file.buffer.toString('base64') : null,
           storeAsFileData ? file.buffer.toString('base64') : null,
@@ -213,9 +268,13 @@ router.get('/:id/image', (req, res) => {
   const canView = canAccessDoc(doc, user);
   if (!canView) return res.status(403).end();
 
-  res.setHeader('Content-Type', doc.mime_type || 'image/png');
-  res.setHeader('Cache-Control', 'private, max-age=3600');
-  res.send(Buffer.from(doc.image_data, 'base64'));
+  const buffer = Buffer.from(doc.image_data, 'base64');
+  const { type, unrenderable } = servingInfo({ kind: 'image' }, buffer);
+  if (unrenderable) return res.status(404).end();
+  setDocumentHeaders(res, { type, inline: true });
+  // Short and private: a shared PC must not keep someone's document in its cache after they sign out.
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.send(buffer);
 });
 
 function chunkTextFor(documentId) {
@@ -240,16 +299,21 @@ router.get('/:id/file', (req, res) => {
   const forceDownload = req.query.download === '1';
 
   if (doc.kind === 'image' && doc.image_data) {
-    res.setHeader('Content-Type', doc.mime_type || 'image/png');
-    res.setHeader('Content-Disposition', `${forceDownload ? 'attachment' : 'inline'}; filename="${encodeURIComponent(doc.filename)}"`);
-    return res.send(Buffer.from(doc.image_data, 'base64'));
+    const buffer = Buffer.from(doc.image_data, 'base64');
+    const { type, inline, unrenderable } = servingInfo({ kind: 'image' }, buffer);
+    if (unrenderable) return res.status(404).end();
+    setDocumentHeaders(res, { type, inline: inline && !forceDownload });
+    res.setHeader('Content-Disposition', `${inline && !forceDownload ? 'inline' : 'attachment'}; filename="${encodeURIComponent(doc.filename)}"`);
+    return res.send(buffer);
   }
 
   if (doc.file_data) {
-    const disposition = doc.kind === 'pdf' && !forceDownload ? 'inline' : 'attachment';
-    res.setHeader('Content-Type', doc.mime_type || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(doc.filename)}"`);
-    return res.send(Buffer.from(doc.file_data, 'base64'));
+    const buffer = Buffer.from(doc.file_data, 'base64');
+    const { type, inline } = servingInfo(doc, buffer);
+    const asAttachment = forceDownload || !inline;
+    setDocumentHeaders(res, { type, inline: !asAttachment });
+    res.setHeader('Content-Disposition', `${asAttachment ? 'attachment' : 'inline'}; filename="${encodeURIComponent(doc.filename)}"`);
+    return res.send(buffer);
   }
 
   const text = chunkTextFor(doc.id);
@@ -263,6 +327,20 @@ router.get('/:id/file', (req, res) => {
 // Best-effort inline preview for the side panel: docx/xlsx are converted to HTML on the fly;
 // pptx/text/webpage return the plain text that was indexed for search; pdf doesn't need this
 // route since the browser can render /file directly in an iframe.
+//
+// The HTML comes from a library, but the *content* comes from a file somebody uploaded, and the panel
+// puts it in the page — so it is stripped of everything that can act: scripts, event handlers, and
+// javascript:/data: links (a spreadsheet cell with a hyperlink is enough to produce one). The CSP would
+// block execution anyway; this is the layer that means one CSP change cannot turn into an XSS.
+function sanitisePreviewHtml(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script\s*>/gi, '')
+    .replace(/<(iframe|object|embed|link|meta|base|form)[\s\S]*?>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s(href|src|action)\s*=\s*("|')\s*(javascript|data|vbscript):[^"']*\2/gi, ' $1="#"')
+    .replace(/\s(href|src|action)\s*=\s*(javascript|data|vbscript):[^\s>]*/gi, ' $1="#"');
+}
+
 router.get('/:id/preview', asyncHandler(async (req, res) => {
   const user = currentUser(req);
   const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
@@ -277,7 +355,7 @@ router.get('/:id/preview', asyncHandler(async (req, res) => {
       const mammoth = require('mammoth');
       const buffer = Buffer.from(doc.file_data, 'base64');
       const result = await mammoth.convertToHtml({ buffer });
-      return res.json({ type: 'html', html: result.value });
+      return res.json({ type: 'html', html: sanitisePreviewHtml(result.value) });
     }
     if (doc.kind === 'xlsx') {
       const XLSX = require('xlsx');
@@ -285,14 +363,16 @@ router.get('/:id/preview', asyncHandler(async (req, res) => {
       const workbook = XLSX.read(buffer, { type: 'buffer' });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
       const html = XLSX.utils.sheet_to_html(firstSheet);
-      return res.json({ type: 'html', html });
+      return res.json({ type: 'html', html: sanitisePreviewHtml(html) });
     }
     if (doc.kind === 'pptx' || doc.kind === 'text' || doc.kind === 'webpage') {
       return res.json({ type: 'text', text: chunkTextFor(doc.id) || '(No extracted text available.)' });
     }
     return res.status(400).json({ error: 'No preview available for this file type' });
   } catch (err) {
-    res.status(500).json({ error: 'Could not generate preview', details: err.message });
+    // The parser's own message can name internal paths; the log keeps it.
+    logger.warn('Could not generate a document preview', { documentId: doc.id, error: err.message });
+    return res.status(500).json({ error: 'Could not generate a preview for this file.' });
   }
 }));
 

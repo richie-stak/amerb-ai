@@ -115,7 +115,7 @@ services:
       - amerb-data:/app/data      # SQLite database, secret.key, generated session secret
       - amerb-certs:/app/certs    # self-signed HTTPS certificate
       - amerb-logs:/app/logs      # rotating structured log
-      - amerb-models:/app/node_modules/@xenova/transformers/.cache   # voice-input (Whisper) model cache
+      - amerb-models:/app/node_modules/@huggingface/transformers/.cache   # voice-input (Whisper) model cache
     healthcheck:
       test: ["CMD", "node", "/app/docker/healthcheck.js"]
       interval: 30s
