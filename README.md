@@ -247,9 +247,11 @@ unknown state. `/health` reports database and Ollama state. Errors are logged in
 the browser as a plain message, never a stack trace. Downloading the whole database is recorded in the
 audit log.
 
-**Dependencies.** `npm audit --omit=dev` is expected to be clean apart from the advisory on
-`image-size` (used only by `pptxgenjs` when generating presentations; the app never parses untrusted
-images through it). Run `npm audit` after every dependency change and before each release.
+**Dependencies.** `npm audit --omit=dev` reports two high advisories, both `image-size` (reached
+only through `pptxgenjs` when it embeds an image into a generated presentation; the app builds decks from
+text and never passes an uploaded image to it — no fixed `pptxgenjs` release exists yet). Voice input's
+`sharp` dependency is pinned to a patched version. Run `npm audit` after every dependency change and
+before each release.
 
 **Known limitations, documented rather than hidden.** Voice input cannot load on a Windows server whose
 own `onnxruntime.dll` shadows the speech model's runtime — the app reports it and typing keeps working
