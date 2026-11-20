@@ -14,6 +14,9 @@ const db = new DatabaseSync(DB_PATH);
 db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA foreign_keys = ON;
+  -- Another process (a backup, a maintenance script) holding the write lock briefly should make a query
+  -- wait, not fail with SQLITE_BUSY and turn into a 500 for the person asking.
+  PRAGMA busy_timeout = 5000;
 
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

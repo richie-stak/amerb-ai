@@ -5,6 +5,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { getExplicitContext, getHybridContext } = require('../retrieval');
 const { TOOL_DEFS, toolDefs, executeTool, webSearch } = require('../tools');
 const { isWebSearchEnabled, getHouseModel, isKbOnlineFallbackEnabled, isExchangeRateEnabled } = require('../settings');
+const { parseCurrencyRequest, rateFigures, answerStatesRate } = require('../currency');
 const { isSearchRestricted } = require('../settings');
 const { addMemory, memoryPrompt } = require('../memory');
 const llm = require('../llm');
@@ -212,6 +213,14 @@ function looksLikePolicyQuestion(text) {
 
 // The bank-policy → approved-websites fallback. Returns null when it doesn't apply, otherwise the
 // payload the browser is told about (and that is also fed to the model as context).
+// True when the message is just "what is the rate" / "convert 500 cedis": nothing to reason about, so
+// the fetched number is the whole answer.
+const SIMPLE_RATE_ONLY = /\b(and|then|plus|minus|percent|fee|charge|interest|explain|why|policy|history|trend|forecast|compare|calculate|loan|repayment|repay|search|web|online|find|look up|browse)\b/i;
+function isSimpleRateQuestion(question, request) {
+  const text = String(question || '');
+  if (!request || text.length > 120) return false;
+  return !SIMPLE_RATE_ONLY.test(text);
+}
 async function policyWebFallback({ question, citations, attachedDocs, autoContext }) {
   if (citations.length || attachedDocs.length || autoContext) return null; // the knowledge bases had something
   if (!isKbOnlineFallbackEnabled() || !looksLikePolicyQuestion(question)) return null;
@@ -443,6 +452,11 @@ async function runAssistantTurn(
 
   let full = '';
   let thinkingFull = '';
+  // Declared outside the try so the reply-guarantee block after it can still see them (they are
+  // filled in inside it).
+  let rateLookup = null;
+  let forcedSearchFailure = null;
+  let directRateAnswer = false;
   const generatedAttachments = [];
   // Shared across every tool call in this turn — lets a web_search's result domains become
   // fetchable via fetch_url later in the same turn without needing admin pre-approval.
@@ -503,6 +517,7 @@ async function runAssistantTurn(
                 'mention that live search results were unavailable if that is actually relevant to the answer.',
           });
         } catch (err) {
+          forcedSearchFailure = err.message;
           sendEvent(res, 'tool', {
             name: 'web_search',
             args: { query: lastUserContent },
@@ -513,6 +528,48 @@ async function runAssistantTurn(
       }
     }
 
+    // Exchange rates are the question staff ask most, and a small model stops choosing the tool as soon
+    // as the conversation already contains its own "I don't have real-time data" answer. So the lookup is
+    // done here, the result is put in front of the model as a fact, and below the reply is checked to make
+    // sure the rate actually reached the person.
+    // The user asking to search gets a search — the deterministic rate answer would otherwise swallow a
+    // perfectly explicit "search for the current rate".
+    if (isExchangeRateEnabled() && !effectiveForceWebSearch) {
+      const request = parseCurrencyRequest(lastUserContent);
+      if (request) {
+        sendEvent(res, 'tool', { name: 'exchange_rate', args: request, status: 'running' });
+        try {
+          const { text: resultText } = await executeTool('exchange_rate', request, toolContext);
+          sendEvent(res, 'tool', { name: 'exchange_rate', args: request, status: 'done', result: String(resultText).slice(0, 500) });
+          rateLookup = { args: request, text: String(resultText), figures: [], failed: /^(Error|could not get an exchange rate)/i.test(String(resultText)) };
+          if (!rateLookup.failed) {
+            rateLookup.figures = rateFigures(rateLookup.text);
+            directRateAnswer = isSimpleRateQuestion(lastUserContent, request);
+            messagesForModel.push({
+              role: 'system',
+              content:
+                'The exchange rate the user asked about has already been looked up for you — do not call the ' +
+                'exchange_rate tool again and do not say you lack live data. Here is the result:\n\n' +
+                rateLookup.text +
+                '\n\nAnswer the question using exactly this rate. State the rate, the date it was published and ' +
+                'which service it came from, in the language you are replying in.',
+            });
+          }
+        } catch (err) {
+          sendEvent(res, 'tool', { name: 'exchange_rate', args: request, status: 'done', result: `Error: ${err.message}` });
+          rateLookup = { args: request, text: err.message, figures: [], failed: true };
+        }
+      }
+    }
+
+    // A plain rate question is answered from the fetched fact above; the model is only used when there
+    // is actually something to reason about (a conversion plus arithmetic, a policy question about
+    // rates, and so on).
+    if (directRateAnswer) {
+      const fact = String(rateLookup.text).split(/Tell the user/i)[0].trim();
+      full = `**Exchange rate**\n\n${fact}\n\nAsk if you want a different amount converted.`;
+      sendEvent(res, 'token', { delta: full });
+    } else {
     // One streamed call per round: reply text appears in the browser as soon as the model starts
     // writing, and any tool calls it makes are executed and fed back for another round. Tools are
     // only offered to models that advertise support, and the last round withholds them so a
@@ -646,6 +703,7 @@ async function runAssistantTurn(
         }
       }
     }
+    }
   } catch (err) {
     if (err.name !== 'AbortError') {
       sendEvent(res, 'error', {
@@ -726,7 +784,9 @@ async function runAssistantTurn(
   // user's own message and give the model one corrected pass before saving the reply.
   const REFUSAL_PATTERN =
     /\b(don't have (?:any )?information|do not have (?:any )?information|can'?t (?:provide|find) information|cannot (?:provide|find) information|not a (?:standard|recognized|known) term|could you clarify|not sure what[^.!?\n]{0,30}(?:refers? to|means)|unfamiliar (?:with|term))\b/i;
-  if (!searchedThisTurn && full && REFUSAL_PATTERN.test(full) && isWebSearchEnabled()) {
+  // When the rate was already fetched there is nothing to search for: the facts are appended below, and
+  // a second full model pass would only make the person wait twice as long.
+  if (!searchedThisTurn && !rateLookup && full && REFUSAL_PATTERN.test(full) && isWebSearchEnabled()) {
     try {
       const results = await webSearch(lastUserContent);
       const resultsText = results.length
@@ -760,6 +820,24 @@ async function runAssistantTurn(
     } catch {
       // best-effort corrective pass — if it fails, the original refusal still stands
     }
+  }
+
+  // The model has finished. If it refused anyway, the facts it was given are appended: a person asking
+  // the cedi rate must not be left with "I have no real-time data" when the rate was already fetched, and
+  // a failed web search must be reported rather than dressed up as "I cannot go online".
+  const appendToReply = (addition) => {
+    full += addition;
+    sendEvent(res, 'token', { delta: addition });
+  };
+  const refusedOnline = /\b(cannot|can'?t|unable|don'?t|do not)\b[^.!?\n]{0,40}(online|internet|browse|live data|real-time)/i;
+  if (rateLookup && rateLookup.failed) {
+    appendToReply(`\n\n**Exchange rate:** I could not get a rate just now — ${String(rateLookup.text).replace(/^Error:\s*/, '')}`);
+  } else if (rateLookup && !answerStatesRate(full, rateLookup.figures)) {
+    const firstSentence = String(rateLookup.text).split(/\.\s/)[0].trim();
+    appendToReply(`\n\n**Current exchange rate:** ${firstSentence}.`);
+  }
+  if (forcedSearchFailure && full && refusedOnline.test(full)) {
+    appendToReply(`\n\n**Web search:** the search was run but the provider did not answer (${forcedSearchFailure}).`);
   }
 
   let newMessageId = null;

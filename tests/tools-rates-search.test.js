@@ -232,3 +232,58 @@ test('a refused or empty search is shown to staff in the reply, with what actual
   const okAnswer = ok.filter((e) => e.event === 'token').map((e) => e.data.delta).join('');
   assert.match(okAnswer, /bog\.gov\.gh/);
 });
+
+test('answers a currency question even when the model refuses to call the tool', async () => {
+  // Reproduces the live failure: with a conversation history containing its own "I don't have real-time
+  // data access" answer, qwen3:4b-instruct stops calling exchange_rate and repeats the refusal. The mock
+  // model never calls tools, which is exactly that behaviour. The rate must still reach the person.
+  const db = server.openDb();
+  const settings = db.prepare("SELECT value FROM app_settings WHERE key = 'exchange_rate_enabled'").get();
+  if (!settings || settings.value !== 'true') {
+    db.prepare("INSERT INTO app_settings (key, value) VALUES ('exchange_rate_enabled', 'true') ON CONFLICT(key) DO UPDATE SET value = excluded.value").run();
+  }
+  db.prepare("UPDATE app_settings SET value = ? WHERE key = 'exchange_rate_url'").run(rateService.url);
+  db.close();
+
+  const staff = await signup('rateasker');
+  const events = await chat(staff, 'what is the current cedi to dollar conversion');
+
+  const toolEvents = events.filter((e) => e.event === 'tool' && e.data.name === 'exchange_rate');
+  assert.ok(toolEvents.length >= 1, 'the rate lookup happens server-side');
+  assert.ok(toolEvents.some((e) => e.data.status === 'done'), 'and its result is shown');
+
+  const answer = events
+    .filter((e) => e.event === 'token')
+    .map((e) => e.data.delta)
+    .join('');
+  assert.match(answer, /0\.0?862|86\.2|Current exchange rate/i, `the reply carries the rate (got: ${answer.slice(0, 200)})`);
+  assert.ok(!/^\s*I (don't|do not) have real-time/i.test(answer.trim()), 'the reply does not stop at a refusal');
+
+  // It is stored with the reply, so reopening the conversation does not lose it.
+  const row = server.openDb().prepare('SELECT content FROM messages WHERE conversation_id = (SELECT id FROM conversations WHERE user_id = (SELECT id FROM users WHERE username = ?)) ORDER BY id DESC LIMIT 1').get('rateasker');
+  assert.match(row.content, /0\.0?862|Current exchange rate/i);
+});
+
+test('answers a plain rate question at once, straight from the fetched rate', async () => {
+  const db = server.openDb();
+  db.prepare("INSERT INTO app_settings (key, value) VALUES ('exchange_rate_enabled', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'").run();
+  db.prepare("UPDATE app_settings SET value = ? WHERE key = 'exchange_rate_url'").run(rateService.url);
+  db.close();
+
+  const staff = await signup('ratefast');
+  const events = await chat(staff, 'what is the current cedi to dollar conversion');
+  const answer = events.filter((e) => e.event === 'token').map((e) => e.data.delta).join('');
+
+  // The fetched fact is the whole reply: no waiting for a model to restate it (minutes on this bank's
+  // CPU) and no chance of a "no real-time data" refusal.
+  assert.match(answer, /\*\*Exchange rate\*\*/);
+  assert.match(answer, /0\.0?862/);
+  assert.match(answer, /Wed,|19 Nov 2026/);
+  assert.match(answer, /127\.0\.0\.1/, 'the source is named');
+
+  // A question that needs reasoning still goes to the model, with the rate handed to it as a fact.
+  const reasoning = await chat(staff, 'convert 1000 cedis to dollars and explain whether that is a good rate for a loan');
+  const reasoningAnswer = reasoning.filter((e) => e.event === 'token').map((e) => e.data.delta).join('');
+  assert.ok(reasoning.filter((e) => e.event === 'tool' && e.data.name === 'exchange_rate').length >= 1, 'the rate was fetched');
+  assert.match(reasoningAnswer, /0\.0?862|Current exchange rate/);
+});
