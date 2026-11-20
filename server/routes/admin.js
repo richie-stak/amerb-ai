@@ -283,6 +283,27 @@ router.post('/models/delete', asyncHandler(async (req, res) => {
   if (typeof model !== 'string' || !model.trim()) {
     return res.status(400).json({ error: 'Model name is required' });
   }
+  // The embedding model powers document search and the chat model answers questions; deleting either
+  // leaves the app quietly degraded (this installation lost its embeddings that way on 20 Nov). Refuse,
+  // and say how to proceed deliberately if the replacement is already configured.
+  const modelCapabilities = require('../modelCapabilities');
+  const { EMBED_MODEL } = require('../embeddings');
+  const settings = require('../settings');
+  const house = typeof settings.getHouseModel === 'function' ? settings.getHouseModel() : null;
+  const protectedModels = [
+    { name: EMBED_MODEL, why: 'it is the embedding model that document search and indexing depend on' },
+    ...(house && house.name ? [{ name: house.name, why: 'it is the configured chat model' }] : []),
+  ];
+  const tagOf = (n) => (n.includes(':') ? n : n + ':latest');
+  const protectedMatch = protectedModels.find((entry) => tagOf(entry.name) === tagOf(model.trim()));
+  if (protectedMatch) {
+    return res.status(400).json({
+      error:
+        '"' + model.trim() + '" cannot be deleted: ' + protectedMatch.why + '. Change the configuration to a different ' +
+        'model first (Admin -> Models / EMBED_MODEL), or put it back if it was removed by mistake: ollama pull ' + protectedMatch.name,
+      code: 'model_in_use',
+    });
+  }
   try {
     const r = await fetch(`${OLLAMA_URL}/api/delete`, {
       method: 'DELETE',

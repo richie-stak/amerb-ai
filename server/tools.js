@@ -472,6 +472,11 @@ async function fetchUrl(rawUrl, extraAllowed) {
 
 // Overridable so the test suite can serve a stand-in search page instead of the real internet.
 const SEARCH_ENDPOINT = process.env.AMERB_SEARCH_URL || 'https://html.duckduckgo.com/html/';
+// The lightweight endpoint (different page, different rate limit); used when the HTML one is refused.
+const SEARCH_ENDPOINT_LITE = process.env.AMERB_SEARCH_LITE_URL || 'https://lite.duckduckgo.com/lite/';
+// Last resort: Bing's news RSS feed (no key). Reliable from this network even when the HTML engines answer
+// with anti-bot pages; it is news-oriented, which is exactly what "current information" questions want.
+const SEARCH_ENDPOINT_NEWS = process.env.AMERB_BING_NEWS_URL || 'https://www.bing.com/news/search';
 const SEARCH_TIMEOUT_MS = 10000;
 const MAX_SEARCH_RESULTS = 5;
 
@@ -503,38 +508,74 @@ async function webSearch(query, { sitesOnly = false } = {}) {
   const searx = searxngUrl();
   if (searx) return searxngSearch(searx, effectiveQuery, domains);
 
+  // Try the engines in order. A refusal from one is not the end of the search: the next engine may well
+  // answer, and the person asking deserves a real "searched and found" rather than an infrastructure note.
+  const attempts = [];
+  // The fallbacks belong to the built-in DuckDuckGo backend: two endpoints (the plain-HTML page and the
+  // lightweight one, separate rate limits) and Bing News as a last resort. A provider the administrator
+  // configured themselves is used on its own — replacing it with DuckDuckGo would ignore that choice.
+  // A provider configured on its own is used alone; when every endpoint in the chain is provided (the test
+  // suite points them at local stand-ins) the chain is used, and with nothing configured the built-in
+  // DuckDuckGo + Bing News endpoints are used.
+  const customProvider =
+    Boolean(process.env.AMERB_SEARCH_URL) &&
+    !(process.env.AMERB_SEARCH_LITE_URL && process.env.AMERB_BING_NEWS_URL);
+  const engines = customProvider
+    ? [{ name: 'the configured search provider', search: () => duckDuckGoSearch(effectiveQuery, SEARCH_ENDPOINT) }]
+    : [
+        { name: 'DuckDuckGo', search: () => duckDuckGoSearch(effectiveQuery, SEARCH_ENDPOINT) },
+        { name: 'DuckDuckGo (lite)', search: () => duckDuckGoSearch(effectiveQuery, SEARCH_ENDPOINT_LITE) },
+        // Bing News returns nothing for the long "(site:a OR site:b)" form, so it searches the plain
+        // question; the approved-domain filter below still guarantees a restricted search only surfaces
+        // approved sites.
+        { name: 'Bing News', search: () => bingNewsSearch(query) },
+      ];
+  for (const engine of engines) {
+    try {
+      const results = await engine.search();
+      if (results.length) return restrict ? keepApprovedDomains(results, domains) : results;
+      attempts.push(`${engine.name}: no results`);
+    } catch (err) {
+      attempts.push(`${engine.name}: ${err.message}`);
+    }
+  }
+  throw new Error(
+    'Web search is not working from this server — ' +
+      attempts.join('; ') +
+      '. An administrator can point SEARXNG_URL at a self-hosted search service.'
+  );
+}
+
+// One engine: DuckDuckGo's plain-HTML endpoint. Result links are wrapped in a DDG redirect
+// ("/l/?uddg=<encoded target>&rut=...") — extract the real URL.
+async function duckDuckGoSearch(effectiveQuery, endpoint) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
   let res;
   try {
-    res = await fetch(`${SEARCH_ENDPOINT}?q=${encodeURIComponent(effectiveQuery)}`, {
+    res = await fetch(`${endpoint}?q=${encodeURIComponent(effectiveQuery)}`, {
       headers: { 'User-Agent': DEFAULT_USER_AGENT },
       signal: controller.signal,
     });
   } catch (err) {
-    throw new Error(`Could not reach the search provider: ${err.message}`);
+    throw new Error(`could not reach the search provider (${err.message})`);
   } finally {
     clearTimeout(timer);
   }
   // DuckDuckGo (and others) answer HTTP 202 with a bot-check page when they decide a machine is
   // automated. Reporting "no results" there is misleading: the search never happened.
   if (res.status !== 200) {
-    throw new Error(
-      `The search provider refused the request (HTTP ${res.status}` +
-        (res.status === 202 ? ', anti-bot check' : '') +
-        '), so web search is not working from this server. An administrator can point SEARXNG_URL at a self-hosted search service.'
-    );
+    throw new Error(`refused the request (HTTP ${res.status}` + (res.status === 202 ? ', anti-bot check' : '') + ')');
   }
 
   const html = await res.text();
-  if (!/result__a/.test(html) && /anomaly|captcha|robot|unusual traffic/i.test(html)) {
-    throw new Error(
-      'The search provider returned a bot-check page instead of results, so the search did not happen. An administrator can point SEARXNG_URL at a self-hosted search service.'
-    );
+  if (!/result__a|result-link/.test(html) && /anomaly|captcha|robot|unusual traffic/i.test(html)) {
+    throw new Error('returned a bot-check page instead of results');
   }
 
+  // The HTML endpoint marks results class="result__a"; the lightweight endpoint uses class="result-link".
   const links = [];
-  const linkRe = /<a rel="nofollow" class="result__a" href="([^"]+)">([\s\S]*?)<\/a>/g;
+  const linkRe = /<a[^>]*class="(?:result__a|result-link)"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
   let match;
   while ((match = linkRe.exec(html)) && links.length < MAX_SEARCH_RESULTS) {
     const uddgMatch = match[1].match(/uddg=([^&]+)/);
@@ -550,12 +591,74 @@ async function webSearch(query, { sitesOnly = false } = {}) {
   }
 
   const snippets = [];
-  const snippetRe = /<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+  const snippetRe = /<(?:a|td)[^>]*class="(?:result__snippet|result-snippet)"[^>]*>([\s\S]*?)<\/(?:a|td)>/g;
   while ((match = snippetRe.exec(html)) && snippets.length < links.length) {
     snippets.push(stripHtml(match[1]));
   }
 
   return links.map((link, i) => ({ ...link, snippet: snippets[i] || '' }));
+}
+
+// Last resort: Bing News RSS (no key). It answers reliably from this network even when the HTML engines
+// reply with anti-bot pages, and it is news-oriented — which is what "current information" questions want.
+// <item><title>…</title><link>http://www.bing.com/news/apiclick.aspx?…&amp;url=<encoded article></link>
+// <description>…</description></item>; the link wraps the real article address in its url= parameter.
+async function bingNewsSearch(effectiveQuery) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${SEARCH_ENDPOINT_NEWS}?q=${encodeURIComponent(effectiveQuery)}&format=rss`, {
+      headers: { 'User-Agent': DEFAULT_USER_AGENT, Accept: 'application/rss+xml,application/xml' },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw new Error(`could not reach the search provider (${err.message})`);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (res.status !== 200) throw new Error(`refused the request (HTTP ${res.status})`);
+  const xml = await res.text();
+
+  const results = [];
+  const items = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+  for (const item of items) {
+    if (results.length >= MAX_SEARCH_RESULTS) break;
+    const title = stripHtml((/<title>([\s\S]*?)<\/title>/.exec(item) || [])[1] || '').trim();
+    const link = (/<link>([\s\S]*?)<\/link>/.exec(item) || [])[1] || '';
+    const target = decodeBingNewsUrl(link);
+    if (!title || !target) continue;
+    const snippet = stripHtml((/<description>([\s\S]*?)<\/description>/.exec(item) || [])[1] || '')
+      .replace(/<[^>]+>/g, '')
+      .trim();
+    results.push({ title, url: target, snippet });
+  }
+  return results;
+}
+
+// http://www.bing.com/news/apiclick.aspx?...&url=<percent-encoded article> -> the article address.
+function decodeBingNewsUrl(link) {
+  try {
+    const href = String(link).replace(/&amp;/g, '&');
+    const urlMatch = /[?&]url=([^&]+)/.exec(href);
+    const target = urlMatch ? decodeURIComponent(urlMatch[1]) : href;
+    new URL(target); // validate
+    return target;
+  } catch {
+    return null;
+  }
+}
+
+function keepApprovedDomains(results, domains) {
+  const allowed = domains.map((d) => String(d).toLowerCase());
+  return results.filter((r) => {
+    try {
+      const host = new URL(r.url).hostname.toLowerCase();
+      return allowed.some((d) => host === d || host.endsWith('.' + d));
+    } catch {
+      return false;
+    }
+  });
 }
 
 // Rates barely move within minutes, so a short cache keeps a busy chat from hammering the service.

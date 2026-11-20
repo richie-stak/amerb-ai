@@ -10,6 +10,7 @@ const STOPWORDS = new Set([
   'where', 'which', 'who', 'why', 'how', 'are', 'was', 'were', 'been', 'will',
   'about', 'into', 'your', 'you', 'can', 'does', 'did', 'has', 'a', 'an', 'of',
   'to', 'in', 'on', 'is', 'it', 'as', 'be', 'or', 'at', 'by',
+  'our', 'their', 'its', 'his', 'her', 'my', 'we', 'they', 'them', 'these', 'those',
 ]);
 
 // Words in a question that say nothing about *which* document is wanted: the bank's own name
@@ -18,6 +19,8 @@ const STOPWORDS = new Set([
 const QUERY_NOISE = new Set([
   'amenfiman', 'community', 'bank', 'banks', 'rural', 'plc', 'amerb',
   'search', 'google', 'online', 'web', 'internet', 'website', 'please', 'tell', 'find', 'look',
+  'summarize', 'summarise', 'summary', 'describe', 'explain', 'outline', 'overview', 'brief',
+  'detail', 'details', 'list', 'provide', 'give', 'show', 'state', 'according',
   'information', 'info', 'know', 'give', 'show', 'want', 'need', 'help',
 ]);
 
@@ -92,6 +95,15 @@ function keywordChunks(user, query, excludeDocumentIds = []) {
   if (!rows.length) return [];
 
   const termsByChunk = rows.map((r) => new Set(tokenize(r.content)));
+
+  // A word that appears in no chunk can never contribute to a score, so it must not raise the number of
+  // terms a chunk has to contain. "Summarize our password policy" used to fail exactly this way: with
+  // {summarize, our, password, policy} the threshold was two matches, and the password standard's chunk
+  // scored one (password) because "summarize"/"our" are not in any policy document.
+  const presentInAnyChunk = (term) => termsByChunk.some((set) => set.has(term));
+  queryTerms = new Set([...queryTerms].filter(presentInAnyChunk));
+  if (!queryTerms.size) return [];
+
   const documentIds = new Set(rows.map((r) => r.document_id));
   if (documentIds.size >= COMMON_TERM_MIN_DOCS) {
     const docsWithTerm = (term) => new Set(rows.filter((_, i) => termsByChunk[i].has(term)).map((r) => r.document_id)).size;
@@ -99,10 +111,11 @@ function keywordChunks(user, query, excludeDocumentIds = []) {
     if (!queryTerms.size) return [];
   }
 
-  // Require a real chunk of the query's distinct keywords to show up, not just one incidental
-  // word in common — a single shared term between a 2-word query and an unrelated 40-page PDF is
-  // noise, not a match, and was previously enough to drag irrelevant documents into every answer.
-  const minMatches = queryTerms.size === 1 ? 1 : Math.max(2, Math.ceil(queryTerms.size / 2));
+  // Every term left has already been filtered: it appears somewhere in the knowledge base and is not so
+  // common that it says nothing about which document is wanted. So one of them matching is a real signal;
+  // requiring half the terms (minimum two) meant a single distinctive word — "password" — was not enough,
+  // and the policy was reported as missing. Chunks matching more of the terms still rank higher below.
+  const minMatches = 1;
 
   return rows
     .map((r, i) => {

@@ -115,3 +115,19 @@ test('a client error keeps its explanation (not an opaque 500)', async () => {
   assert.equal(body.code, 'model_role_mismatch');
   assert.match(body.error, /embedding model/i);
 });
+
+test('the embedding model cannot be deleted by accident (the 20 Nov regression)', async () => {
+  // Deleting nomic-embed-text left every policy document unindexed and semantic search silently dead.
+  const res = await admin.post('/api/admin/models/delete', { model: 'nomic-embed-text:latest' });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.code, 'model_in_use');
+  assert.match(body.error, /embedding model/i);
+  assert.match(body.error, /cannot be deleted/i);
+  assert.match(body.error, /ollama pull nomic-embed-text/, 'the message says how to put it back');
+
+  // The guard is specific: an ordinary model is not refused with that message.
+  const other = await admin.post('/api/admin/models/delete', { model: 'some-unused-model:latest' });
+  const otherBody = await other.json().catch(() => ({}));
+  assert.notEqual(otherBody.code, 'model_in_use');
+});

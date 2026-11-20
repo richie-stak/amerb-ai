@@ -106,6 +106,11 @@ async function chat(client, content) {
 before(async () => {
   rateService = await startRateService();
   searchService = await startSearchService();
+  // tools.js (used directly by the search tests) reads its endpoint when first required; set it before any
+  // test requires it so these tests talk to the local stand-in rather than the real search engines.
+  process.env.AMERB_SEARCH_URL = searchService.url;
+  delete process.env.AMERB_SEARCH_LITE_URL;
+  delete process.env.AMERB_BING_NEWS_URL;
   ollama = await startMockOllama({ models: ['good'] });
   server = await startTestServer({
     env: {
