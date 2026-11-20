@@ -269,3 +269,32 @@ test('internal addresses cannot be reached through the web tools', () => {
     assert.equal(isPrivateOrReservedIp(ip), false, ip);
   }
 });
+
+test('the CSP hashes follow a page after it is edited, so a static change cannot lock the browser out', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const crypto = require('node:crypto');
+  const { contentSecurityPolicy } = require('../server/security');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'amerb-csp-'));
+  const page = path.join(dir, 'page.html');
+  const hashOf = (script) => crypto.createHash('sha256').update(script, 'utf8').digest('base64');
+  try {
+    const firstScript = "console.log('first version');";
+    fs.writeFileSync(page, `<html><body><script>${firstScript}</script></body></html>`);
+    const firstPolicy = contentSecurityPolicy(dir);
+    assert.ok(firstPolicy.includes(`sha256-${hashOf(firstScript)}`), 'the page as it is on disk is allowed');
+
+    // Simulate editing the page while the server is running (this is what the sign-in prefill change was).
+    const secondScript = "console.log('second version');";
+    fs.writeFileSync(page, `<html><body><script>${secondScript}</script></body></html>`);
+    const secondPolicy = contentSecurityPolicy(dir);
+    assert.ok(secondPolicy.includes(`sha256-${hashOf(secondScript)}`), 'the edited page is allowed without a restart');
+    assert.ok(!secondPolicy.includes(`sha256-${hashOf(firstScript)}`), 'the stale script is no longer allowed');
+    assert.match(secondPolicy, /script-src 'self' 'sha256-/, 'still strict: hashes, not unsafe-inline');
+    assert.ok(!/script-src[^;]*unsafe-inline/.test(secondPolicy));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

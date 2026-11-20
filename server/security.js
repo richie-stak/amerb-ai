@@ -33,15 +33,32 @@ function contentSecurityPolicy(publicDir) {
 }
 
 // Every inline <script> in the served pages, hashed so the browser will run exactly those and nothing
-// else. They are static files, so this is computed once at startup.
+// else. The list is cached against each page's timestamp and size, so changing a page takes effect on the
+// next request. (Computing them once at startup meant that editing a page — adding the sign-in prefill, for
+// example — served the page with new script text but the old hashes, and the browser silently refused to
+// run it: the form did nothing at all.)
+let inlineHashCache = { key: null, dir: null, hashes: [] };
+
 function inlineScriptHashes(publicDir) {
-  const hashes = [];
   let files = [];
   try {
-    files = fs.readdirSync(publicDir).filter((name) => name.endsWith('.html'));
+    files = fs.readdirSync(publicDir).filter((name) => name.endsWith('.html')).sort();
   } catch {
-    return hashes;
+    return [];
   }
+  const key = files
+    .map((name) => {
+      try {
+        const stat = fs.statSync(path.join(publicDir, name));
+        return `${name}:${stat.mtimeMs}:${stat.size}`;
+      } catch {
+        return name;
+      }
+    })
+    .join('|');
+  if (inlineHashCache.key === key && inlineHashCache.dir === publicDir) return inlineHashCache.hashes;
+
+  const hashes = [];
   for (const file of files) {
     let html = '';
     try {
@@ -55,13 +72,15 @@ function inlineScriptHashes(publicDir) {
       hashes.push(crypto.createHash('sha256').update(body, 'utf8').digest('base64'));
     }
   }
-  return [...new Set(hashes)];
+  inlineHashCache = { key, dir: publicDir, hashes: [...new Set(hashes)] };
+  return inlineHashCache.hashes;
 }
 
 function securityHeaders({ publicDir, httpsOnly = true }) {
-  const csp = contentSecurityPolicy(publicDir);
   return (req, res, next) => {
-    res.setHeader('Content-Security-Policy', csp);
+    // contentSecurityPolicy() rechecks the pages' timestamps (a handful of stat calls) and only rebuilds
+    // the header when a page changed, so a static edit is picked up without restarting the server.
+    res.setHeader('Content-Security-Policy', contentSecurityPolicy(publicDir));
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
