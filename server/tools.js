@@ -672,12 +672,27 @@ async function fetchRates(url) {
   const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
   if (!res.ok) throw new Error(`rate service answered HTTP ${res.status}`);
   const json = await res.json();
-  // er-api style ({ rates, time_last_update_utc }) and Frankfurter style ({ rates, date }) both work.
-  const rates = json.rates || json.data?.rates;
+  // Three response shapes are accepted:
+  //  - exchangerate-api.com v6: { result, base_code, conversion_rates, time_last_update_utc }
+  //  - open.er-api.com:        { result, base_code, rates, time_last_update_utc }
+  //  - Frankfurter:            { base, rates, date }
+  // The v6 shape matters most: the bank's authorised service uses it, and it was not recognised before.
+  if (json && json.result === 'error') {
+    const kind = String(json['error-type'] || json.error || 'error');
+    if (/invalid-key|missing-key|inactive-account|quota/i.test(kind)) {
+      throw new Error(`the rate service rejected the API key (${kind})`);
+    }
+    throw new Error(`the rate service reported an error (${kind})`);
+  }
+  const rates = json.conversion_rates || json.rates || json.data?.rates;
+  const base = String(json.base_code || json.base || json.data?.base_code || '').toUpperCase();
   if (!rates || typeof rates !== 'object') throw new Error('the rate service returned no rates');
   const value = {
     rates,
-    when: json.time_last_update_utc || json.date || json.time_last_update_unix ? String(json.time_last_update_utc || json.date || '') : '',
+    base,
+    when: json.time_last_update_utc || json.time_next_update_utc || json.date
+      ? String(json.time_last_update_utc || json.date || '')
+      : '',
     source: (() => {
       try {
         return new URL(url).hostname;
@@ -846,10 +861,15 @@ async function executeTool(name, args, context = {}) {
       if (!rateFrom || !rateTo) {
         return { text: `Error: the rate service does not list ${!rateFrom ? from : to}.` };
       }
-      // The service quotes everything against one base currency, so the cross-rate is the ratio.
+      // The service quotes everything against one base currency (USD for the v6 API, as the base_code says),
+      // so the cross-rate is the ratio of the two quoted rates — correct whatever the base is, and for
+      // converting away from the base currency too (e.g. USD -> GHS).
       const rate = rateTo / rateFrom;
       const when = data.when ? ` as published ${data.when}` : '';
-      const converted = Number.isFinite(amount) && amount > 0 ? ` ${amount} ${from} = ${(amount * rate).toFixed(2)} ${to}.` : '';
+      const converted =
+        Number.isFinite(amount) && amount > 0 && amount !== 1
+          ? ` ${amount} ${from} = ${(amount * rate).toFixed(2)} ${to}.`
+          : '';
       return {
         text:
           `1 ${from} = ${rate.toFixed(6)} ${to}${when} (source: ${data.source}).${converted} ` +

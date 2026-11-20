@@ -22,6 +22,24 @@ function startRateService() {
       res.writeHead(503);
       return res.end('down');
     }
+    if (state.invalidKey) {
+      // exchangerate-api.com answers HTTP 200 with an error payload, not an HTTP error.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ result: 'error', 'error-type': 'invalid-key' }));
+    }
+    if (req.url.includes('/latest/USD')) {
+      // exchangerate-api.com v6: base USD, conversion_rates, result/base_code fields.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(
+        JSON.stringify({
+          result: 'success',
+          base_code: 'USD',
+          time_last_update_utc: 'Fri, 20 Nov 2026 00:00:03 +0000',
+          time_next_update_utc: 'Sat, 21 Nov 2026 00:00:03 +0000',
+          conversion_rates: { USD: 1, GHS: 11.7835, EUR: 0.9108, GBP: 0.7624 },
+        })
+      );
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(
       JSON.stringify({
@@ -291,4 +309,48 @@ test('answers a plain rate question at once, straight from the fetched rate', as
   const reasoningAnswer = reasoning.filter((e) => e.event === 'token').map((e) => e.data.delta).join('');
   assert.ok(reasoning.filter((e) => e.event === 'tool' && e.data.name === 'exchange_rate').length >= 1, 'the rate was fetched');
   assert.match(reasoningAnswer, /0\.0?862|Current exchange rate/);
+});
+
+test('the bank-authorised API shape (USD base, conversion_rates) converts in both directions', async () => {
+  const db = server.openDb();
+  db.prepare("INSERT INTO app_settings (key, value) VALUES ('exchange_rate_url', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(
+    rateService.url.replace('/v6/latest/GHS', '/v6/latest/USD')
+  );
+  db.close();
+
+  const tools = require('../server/tools');
+  const { text: usdToGhs, meta: m1 } = await tools.executeTool('exchange_rate', { from: 'USD', to: 'GHS' }, { user: null });
+  assert.match(usdToGhs, /1 USD = 11\.783500 GHS/, usdToGhs);
+  assert.match(usdToGhs, /Fri, 20 Nov 2026/, 'the publication time from the v6 response is used');
+  assert.equal(m1.exchangeRate.rate, 11.7835);
+
+  const { text: ghsToUsd } = await tools.executeTool('exchange_rate', { from: 'GHS', to: 'USD', amount: 1000 }, { user: null });
+  assert.match(ghsToUsd, /1 GHS = 0\.084864 USD/, ghsToUsd);
+  assert.match(ghsToUsd, /1000 GHS = 84\.86 USD/, 'the amount is converted with the correct direction');
+  assert.ok(!/1 GHS = 11\.78/.test(ghsToUsd), 'the base rate is never returned the wrong way round');
+
+  const { text: eur } = await tools.executeTool('exchange_rate', { from: 'GHS', to: 'EUR' }, { user: null });
+  assert.match(eur, /0\.077295 EUR/, 'cross-rates are computed as a ratio of the two quoted rates');
+
+  // Put the original address back for any later test.
+  const db2 = server.openDb();
+  db2.prepare("UPDATE app_settings SET value = ? WHERE key = 'exchange_rate_url'").run(rateService.url);
+  db2.close();
+});
+
+test('a rejected API key is reported clearly instead of "no rates"', async () => {
+  rateService.state.invalidKey = true;
+  const db = server.openDb();
+  db.prepare("UPDATE app_settings SET value = ? WHERE key = 'exchange_rate_url'").run(`${rateService.url}-invalid-key`);
+  db.close();
+  try {
+    const { text: errorText } = await require('../server/tools').executeTool('exchange_rate', { from: 'GHS', to: 'USD' }, { user: null });
+    assert.match(errorText, /rejected the API key/i, errorText);
+    assert.match(errorText, /Do not guess a rate/);
+  } finally {
+    rateService.state.invalidKey = false;
+    const db2 = server.openDb();
+    db2.prepare("UPDATE app_settings SET value = ? WHERE key = 'exchange_rate_url'").run(rateService.url);
+    db2.close();
+  }
 });
