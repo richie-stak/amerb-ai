@@ -201,6 +201,29 @@ The first account is not automatically an admin — promote your first admin man
 - **@-mention a document** — typing `@` in the composer brings up an autocomplete of documents visible to you (your department's uploads, plus bank-wide ones); picking one attaches it to the message the same way the paperclip button does.
 - **Voice input** (mic button in the composer) — speech-to-text runs entirely locally via a small Whisper model (`@xenova/transformers`, ONNX + WASM, no native build step). The model itself (~40MB) downloads once from Hugging Face on first use, the same one-time-download-then-fully-offline pattern as `ollama pull` — after that, transcription never leaves the machine, unlike the browser's own built-in speech recognition, which would send audio to a cloud provider.
 
+## Database: migrations, backups and integrity
+
+The schema is versioned. Every change is a numbered, named migration in `server/migrations.js`, applied
+inside a transaction at startup and recorded in the `schema_migrations` table. Before a database that
+already holds data is changed, a verified snapshot is written to `data/backups/` (via SQLite's
+`VACUUM INTO`, so it includes everything in the write-ahead log). A migration that fails rolls back and
+stops the app from starting against a half-changed schema.
+
+```bash
+npm run db:status     # which migrations have been applied
+npm run db:check      # integrity_check, foreign_key_check and row counts (read-only)
+npm run db:backup     # verified snapshot now, safe while the app is running
+npm run db:backups    # list the snapshots
+npm run db:migrate    # apply pending migrations now (a start does this anyway)
+node scripts/db.js restore data/backups/<file>.sqlite   # stop the app first
+```
+
+Snapshots are pruned to the newest 20, and `restore` checks the snapshot's integrity and keeps a
+`pre-restore` copy of the current database before replacing it. SQLite runs in WAL mode with
+`synchronous=NORMAL` and a 5-second `busy_timeout`, so a concurrent backup or maintenance script makes a
+query wait rather than fail. A quick integrity check runs at every start and reports damage instead of
+serving from it. The database file itself is not encrypted at rest — protect the machine and the backups.
+
 ## Production hardening
 
 This section is the checklist the app was hardened against; it is not optional reading if the app is
@@ -240,6 +263,16 @@ link-local, carrier-grade-NAT, benchmarking, mapped-IPv6 and multicast addresses
 resolution, with the connection pinned to the checked IP). Web search is off by default; when the
 bank's own documents cannot answer a policy question, only the approved websites are searched and the
 reply says which ones.
+
+**Model roles.** A model is either a chat model or an embedding model, and the app never uses one as
+the other. The model picker, the department/routing settings and the chat endpoints all consult Ollama's
+own capability list (`/api/show`), with the model name as a fallback when Ollama is unreachable: an
+embedding model such as `nomic-embed-text` can only be used for document-search vectors, and a chat
+request naming one is refused with an explanation rather than failing over to a different model.
+Conversations found holding an embedding model as their chat model are corrected once at startup, logged
+and audited (never swapped silently at answer time). `EMBED_MODEL` names the embedding model; the default
+chat model comes from `DEFAULT_MODEL` / the house model. Run `ollama pull nomic-embed-text` once so
+document search has its model; without it, search falls back to keywords and says so in the log.
 
 **Operations.** `SIGTERM` drains in-flight answers before exiting (10 s cap) and an uncaught exception
 shuts the process down deliberately, so the service restarts a clean one instead of carrying on in an

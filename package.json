@@ -13,7 +13,12 @@
     "service:repair": "node scripts/service/repair.js",
     "service:uninstall": "node scripts/service/uninstall.js",
     "service:status": "node scripts/service/status.js",
-    "network:info": "node scripts/networking.js"
+    "network:info": "node scripts/networking.js",
+    "db:status": "node scripts/db.js status",
+    "db:migrate": "node scripts/db.js migrate",
+    "db:backup": "node scripts/db.js backup",
+    "db:check": "node scripts/db.js check",
+    "db:backups": "node scripts/db.js list"
   },
   "dependencies": {
     "@highlightjs/cdn-assets": "^11.12.0",

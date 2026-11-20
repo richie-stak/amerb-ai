@@ -351,6 +351,18 @@ router.get('/:id/preview', asyncHandler(async (req, res) => {
     if ((doc.kind === 'docx' || doc.kind === 'xlsx') && !doc.file_data) {
       return res.json({ type: 'text', text: chunkTextFor(doc.id) || '(No preview available for this file.)' });
     }
+    if (doc.kind === 'image') {
+      // An image is its own preview: the panel shows it from the image endpoint. This used to fall through
+      // to "no preview available for this file type", which is why the chat UI logged repeated 400s for
+      // an uploaded logo (GET /api/documents/69/preview).
+      if (!doc.image_data) return res.status(404).json({ error: 'This image has no stored file to preview.' });
+      return res.json({
+        type: 'image',
+        url: `/api/documents/${doc.id}/image`,
+        filename: doc.filename,
+        mimeType: doc.mime_type,
+      });
+    }
     if (doc.kind === 'docx') {
       const mammoth = require('mammoth');
       const buffer = Buffer.from(doc.file_data, 'base64');
@@ -368,7 +380,10 @@ router.get('/:id/preview', asyncHandler(async (req, res) => {
     if (doc.kind === 'pptx' || doc.kind === 'text' || doc.kind === 'webpage') {
       return res.json({ type: 'text', text: chunkTextFor(doc.id) || '(No extracted text available.)' });
     }
-    return res.status(400).json({ error: 'No preview available for this file type' });
+    // Every kind the app stores has a preview path now (images above, pdf via /file, the rest as text),
+    // so this is a genuinely unknown kind rather than a missing feature.
+    logger.warn('No preview renderer for a stored document kind', { documentId: doc.id, kind: doc.kind });
+    return res.status(400).json({ error: `No preview is available for this kind of file (${doc.kind}).` });
   } catch (err) {
     // The parser's own message can name internal paths; the log keeps it.
     logger.warn('Could not generate a document preview', { documentId: doc.id, error: err.message });

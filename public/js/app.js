@@ -201,6 +201,15 @@
       if (!res.ok) throw new Error(data.error || 'Could not load preview');
       if (data.type === 'html') {
         previewBody.innerHTML = `<div class="preview-html">${data.html}</div>`;
+      } else if (data.type === 'image') {
+        // Uploaded logos and generated images have no extracted text — the file itself is the preview.
+        // They used to fall through to "no preview available", which the log showed as repeated 400s.
+        const img = document.createElement('img');
+        img.className = 'preview-image';
+        img.alt = data.filename || 'Document preview';
+        img.src = data.url;
+        previewBody.innerHTML = '';
+        previewBody.appendChild(img);
       } else {
         previewBody.innerHTML = `<div class="preview-text">${escapeHtml(data.text)}</div>`;
       }

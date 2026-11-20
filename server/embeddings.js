@@ -8,6 +8,16 @@ const { OLLAMA_URL } = require('./ollama');
 const { searchableWhere } = require('./documentAccess');
 
 const EMBED_MODEL = process.env.EMBED_MODEL || 'nomic-embed-text';
+// A chat model produces meaningless vectors for search, and an embedding model cannot chat. The role is
+// checked from the model name here (this module loads before the capability cache is filled) and again
+// when indexing starts, where Ollama's own capability list is available.
+const modelCapabilities = require('./modelCapabilities');
+if (modelCapabilities.classifyChatModel(EMBED_MODEL) === 'chat') {
+  console.error(
+    `[embeddings] EMBED_MODEL="${EMBED_MODEL}" is a chat model, not an embedding model — document search ` +
+      'embeddings will not be built. Set EMBED_MODEL to an embedding model such as nomic-embed-text.'
+  );
+}
 const BATCH_SIZE = 16;
 const INDEX_INTERVAL_MS = 30 * 1000;
 const MAX_CHUNK_CHARS = 2000;

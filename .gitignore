@@ -15,3 +15,6 @@ data/knowledge/
 logs/
 daemon/
 .env.docker
+
+# Verified database snapshots (contain the entire bank database — never commit them)
+data/backups/

@@ -70,7 +70,22 @@ async function startMockOllama({ models = ['good', 'broken', 'midfail', 'backup'
         res.end(JSON.stringify(body));
       };
       if (req.method === 'GET' && req.url === '/api/tags') {
-        return json(200, { models: models.map((name) => ({ name: `${name}:latest`, capabilities: ['completion', 'tools'] })) });
+        return json(200, {
+          models: models.map((name) => ({
+            name: `${name}:latest`,
+            capabilities: name.includes('embed') ? ['embedding'] : ['completion', 'tools'],
+          })),
+        });
+      }
+      if (req.method === 'POST' && req.url === '/api/show') {
+        // Ollama reports what a model can do; the mock follows the naming convention the tests use.
+        const body = JSON.parse(raw);
+        const name = String(body.model || body.name || '');
+        const embedding = name.includes('embed');
+        return json(200, {
+          capabilities: embedding ? ['embedding'] : ['completion', 'tools', 'thinking'],
+          details: { family: embedding ? 'nomic-bert' : 'qwen3', parameter_size: embedding ? '137M' : '4.0B' },
+        });
       }
       if (req.method === 'GET' && req.url === '/api/version') return json(200, { version: '0.0.0-mock' });
       if (req.method === 'GET' && req.url === '/api/ps') {

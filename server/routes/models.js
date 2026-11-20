@@ -5,6 +5,7 @@ const ollama = require('../llm/ollama');
 const { listExternalModels } = require('../llm');
 const db = require('../db');
 const { departmentDefault } = require('../modelRouting');
+const modelCapabilities = require('../modelCapabilities');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -20,7 +21,12 @@ router.get('/', asyncHandler(async (req, res) => {
     ollamaError = err.message;
   }
   const externalModels = listExternalModels();
-  const models = [...localModels, ...externalModels];
+  // Embedding models turn text into vectors for document search; they cannot hold a conversation, and
+  // offering one here is what let it be saved as a chat model (reported 20 Nov 2026). They are removed
+  // from the picker — the embedding model is configured separately for document search.
+  const withRoles = await modelCapabilities.catalog({ models: [...localModels, ...externalModels] });
+  const models = withRoles.filter((m) => m.role !== 'embedding');
+  const hiddenEmbeddingModels = withRoles.filter((m) => m.role === 'embedding').map((m) => m.name);
 
   if (!models.length && ollamaError) {
     return res.status(502).json({
@@ -39,7 +45,8 @@ router.get('/', asyncHandler(async (req, res) => {
   // An admin can give each department its own starting model (Admin → Model routing).
   const user = db.prepare('SELECT department FROM users WHERE id = ?').get(req.session.userId);
   const forDepartment = departmentDefault(user, models.map((m) => m.name));
-  res.json({ models, defaultModel: forDepartment || globalDefault, departmentDefault: Boolean(forDepartment) });
+  res.json({
+    hiddenEmbeddingModels, models, defaultModel: forDepartment || globalDefault, departmentDefault: Boolean(forDepartment) });
 }));
 
 module.exports = router;

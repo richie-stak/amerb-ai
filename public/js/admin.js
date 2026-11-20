@@ -707,7 +707,16 @@
       headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'Request failed');
+    if (res.status === 401) {
+      // Session ended (or the page was opened under a different address than the one signed in on).
+      // Stop here rather than retrying an admin action that cannot succeed.
+      window.location.href = `/login.html?reason=session`;
+      throw new Error('Your session has ended — sign in again.');
+    }
+    if (!res.ok) {
+      const hint = data.details && data.details.hint ? ` — ${data.details.hint}` : '';
+      throw new Error((data.error || 'Request failed') + hint);
+    }
     return data;
   }
 

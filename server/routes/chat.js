@@ -6,6 +6,7 @@ const { getExplicitContext, getHybridContext } = require('../retrieval');
 const { TOOL_DEFS, toolDefs, executeTool, webSearch } = require('../tools');
 const { isWebSearchEnabled, getHouseModel, isKbOnlineFallbackEnabled, isExchangeRateEnabled } = require('../settings');
 const { parseCurrencyRequest, rateFigures, answerStatesRate } = require('../currency');
+const modelCapabilities = require('../modelCapabilities');
 const { isSearchRestricted } = require('../settings');
 const { addMemory, memoryPrompt } = require('../memory');
 const llm = require('../llm');
@@ -1001,6 +1002,9 @@ router.post('/stream', asyncHandler(async (req, res) => {
   if (conversationId != null && !Number.isInteger(conversationId)) {
     return res.status(400).json({ error: 'Invalid conversation id' });
   }
+  // An embedding model cannot hold a conversation. Refusing here — before the queue, the database and
+  // Ollama — is what stops "try to chat with it, fail, and quietly answer with something else".
+  modelCapabilities.assertChatModel(model);
 
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!user) return res.status(401).json({ error: 'Not authenticated' });
@@ -1070,6 +1074,7 @@ router.post('/regenerate', asyncHandler(async (req, res) => {
   if (typeof model !== 'string' || !model.trim()) {
     return res.status(400).json({ error: 'A model must be selected' });
   }
+  modelCapabilities.assertChatModel(model);
   if (!Number.isInteger(conversationId)) {
     return res.status(400).json({ error: 'A conversation id is required' });
   }
@@ -1134,6 +1139,7 @@ router.post('/regenerate', asyncHandler(async (req, res) => {
 // can be judged on equal footing rather than on whichever happened to retrieve better context.
 router.post('/quick', asyncHandler(async (req, res) => {
   const { model, prompt } = req.body || {};
+  if (typeof model === 'string' && model.trim()) modelCapabilities.assertChatModel(model);
   if (typeof model !== 'string' || !model.trim()) {
     return res.status(400).json({ error: 'A model must be selected' });
   }

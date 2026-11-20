@@ -3,15 +3,21 @@ const db = require('../db');
 // Re-checks that the session's user still actually exists (not just that a session cookie is
 // present) — an account can be deleted by an admin while its owner still has a live session, and
 // several routes assume `currentUser(req)` never returns undefined once past this middleware.
+// The body says *why* the request was refused, so the browser can send the person to the sign-in page
+// with an explanation instead of showing a bare error or retrying forever. The requirement itself is
+// unchanged: no session, no access.
+const notAuthenticated = (res) =>
+  res.status(401).json({ error: 'Not authenticated', code: 'unauthenticated', sessionExpired: true });
+
 function requireAuth(req, res, next) {
   if (!req.session || !req.session.userId) {
-    return res.status(401).json({ error: 'Not authenticated' });
+    return notAuthenticated(res);
   }
   const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.session.userId);
   if (!user) {
-    return req.session.destroy(() => res.status(401).json({ error: 'Not authenticated' }));
+    return req.session.destroy(() => notAuthenticated(res));
   }
-  next();
+  return next();
 }
 
 // Roles, from most to least privileged:
@@ -26,7 +32,7 @@ function roleOf(req) {
 
 function requireAdmin(req, res, next) {
   if (!req.session || !req.session.userId) {
-    return res.status(401).json({ error: 'Not authenticated' });
+    return notAuthenticated(res);
   }
   const user = db.prepare('SELECT role FROM users WHERE id = ?').get(req.session.userId);
   if (!user || user.role !== 'admin') {
@@ -39,7 +45,7 @@ function requireAdmin(req, res, next) {
 // stays behind requireAdmin, so auditing never becomes a way in.
 function requireAdminOrAuditor(req, res, next) {
   if (!req.session || !req.session.userId) {
-    return res.status(401).json({ error: 'Not authenticated' });
+    return notAuthenticated(res);
   }
   const user = db.prepare('SELECT role FROM users WHERE id = ?').get(req.session.userId);
   if (!user || !['admin', 'auditor'].includes(user.role)) {

@@ -5,6 +5,7 @@ const { requireAdmin } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const { fetchProviderModels } = require('../llm');
 const { auditAdminChanges } = require('../audit');
+const logger = require('../logger');
 const {
   PROVIDER_TYPES,
   listProviders,
@@ -52,7 +53,31 @@ router.post('/', asyncHandler(async (req, res) => {
   try {
     availableModels = await fetchProviderModels({ type, baseUrl, apiKey: apiKey.trim() });
   } catch (err) {
-    return res.status(400).json({ error: `Could not connect: ${err.message}` });
+    // The person needs to know whether it was the key, the address, the network or the provider's answer —
+    // and the log needs the same, without ever containing the key itself.
+    logger.warn('Provider connection check failed', {
+      type,
+      baseUrl,
+      user: req.session?.userId,
+      reason: err.message,
+      status: err.providerStatus || null,
+    });
+    return res.status(400).json({
+      error: `Could not connect to ${info.label}: ${err.message}`,
+      details: {
+        type,
+        baseUrl,
+        ...(err.providerStatus ? { providerStatus: err.providerStatus } : {}),
+        hint:
+          err.providerStatus === 401 || err.providerStatus === 403
+            ? 'The provider rejected the API key. Check the key and that it is enabled for this account.'
+            : err.providerStatus === 404
+              ? 'The address answered but has no API there. Check the base URL — for OpenAI-compatible providers it usually ends in /v1.'
+              : /fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN/i.test(err.message)
+                ? 'This server could not reach that address — check the internet connection, the URL and any proxy.'
+                : null,
+      },
+    });
   }
   const provider = createProvider({
     type,

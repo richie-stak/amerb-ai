@@ -34,7 +34,18 @@ function getRouting() {
 
 // `known` is the list of model names that actually exist right now (local + enabled external);
 // anything outside it is rejected so a typo can't silently break routing.
-function setRouting({ departmentModels, fallbackModels, fallbackEnabled }, { known, departments }) {
+function setRouting({ departmentModels, fallbackModels, fallbackEnabled }, { known, departments, isChatModel }) {
+  // A model that only produces embeddings cannot answer a message. Checking the role here as well as in
+  // the route means every caller (routing, fallbacks, imports) gets the same rule.
+  const requireChatModel = (model, where) => {
+    // The role is checked first: an embedding model is usually not in the chat list at all, and
+    // "not an available model" would hide why.
+    if (isChatModel && !isChatModel(model)) {
+      throw new Error(`"${model}" is an embedding model and cannot be used as a chat model — choose a chat model such as qwen3:4b-instruct`);
+    }
+    if (!known.includes(model)) throw new Error(`"${model}" is not an available model`);
+    return model;
+  };
   if (departmentModels !== undefined) {
     if (!departmentModels || typeof departmentModels !== 'object' || Array.isArray(departmentModels)) {
       throw new Error('departmentModels must be an object of department → model');
@@ -43,8 +54,7 @@ function setRouting({ departmentModels, fallbackModels, fallbackEnabled }, { kno
     for (const [dept, model] of Object.entries(departmentModels)) {
       if (!model) continue; // empty = use the global default
       if (!departments.includes(dept)) throw new Error(`Unknown department "${dept}"`);
-      if (!known.includes(model)) throw new Error(`"${model}" is not an available model`);
-      clean[dept] = model;
+      clean[dept] = requireChatModel(model, dept);
     }
     setSetting('department_models', JSON.stringify(clean));
   }
@@ -52,7 +62,7 @@ function setRouting({ departmentModels, fallbackModels, fallbackEnabled }, { kno
     if (!Array.isArray(fallbackModels)) throw new Error('fallbackModels must be a list');
     const clean = [];
     for (const model of fallbackModels) {
-      if (!known.includes(model)) throw new Error(`"${model}" is not an available model`);
+      requireChatModel(model, 'fallback');
       if (!clean.includes(model)) clean.push(model);
     }
     setSetting('fallback_models', JSON.stringify(clean));

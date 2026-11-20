@@ -158,8 +158,63 @@ app.use('/api', (err, req, res, next) => {
     });
     return res.status(500).json({ error: 'Something went wrong. The administrator can find the details in the server log.' });
   }
-  return res.status(err.status).json({ error: err.message || 'Request failed' });
+  // A client error keeps its explanation *and* a stable code, so the browser can react to it
+  // (e.g. send the person to the model picker for a model_role_mismatch) without parsing prose.
+  return res.status(err.status).json({
+    error: err.message || 'Request failed',
+    ...(err.code ? { code: err.code } : {}),
+  });
 });
+
+// Model roles: `nomic-embed-text` (and anything else that only produces embeddings) is for document
+// search; `qwen3:4b-instruct` (or whatever an administrator configures) answers messages. This runs once
+// the server is listening, because it asks Ollama. Nothing here changes the model used to answer a
+// question at request time — it corrects data that was saved incorrectly and reports the configuration.
+async function verifyModelRoles() {
+  const modelCapabilities = require('./modelCapabilities');
+  const { EMBED_MODEL } = require('./embeddings');
+  const settings = require('./settings');
+  const { logAudit } = require('./audit');
+
+  const house = typeof settings.getHouseModel === 'function' ? settings.getHouseModel() : null;
+  const chatModel = house?.name || process.env.DEFAULT_MODEL || 'qwen3:4b-instruct';
+
+  // 1. The embedding model must be an embedding model, and it must actually be installed.
+  const embed = await modelCapabilities.modelInfo(EMBED_MODEL);
+  if (embed.role === 'chat') {
+    logger.error('EMBED_MODEL is a chat model — document search embeddings cannot use it', {
+      model: EMBED_MODEL,
+      hint: 'Set EMBED_MODEL to an embedding model such as nomic-embed-text.',
+    });
+  } else if (embed.role === 'embedding' && embed.source === 'ollama') {
+    logger.info('Embedding model ready', { model: EMBED_MODEL, family: embed.family });
+  } else {
+    logger.warn('Embedding model could not be inspected — document search will fall back to keywords', {
+      model: EMBED_MODEL,
+      reason: embed.error || null,
+      hint: 'Install it once: ollama pull nomic-embed-text',
+    });
+  }
+
+  // 2. Chat models must be chat models.
+  const chat = await modelCapabilities.modelInfo(chatModel);
+  if (chat.role === 'embedding') {
+    logger.error('The configured default chat model is an embedding model', { model: chatModel });
+  }
+
+  // 3. Repair conversations whose saved model is an embedding model (this is what produced repeated
+  //    "Model failed — falling back from nomic-embed-text to qwen3" warnings).
+  const repair = modelCapabilities.repairStoredChatModels(db, { target: chatModel });
+  if (repair.conversations || repair.messages) {
+    logger.warn('Conversations with an embedding model saved as their chat model were corrected', {
+      conversations: repair.conversations,
+      messages: repair.messages,
+      replacedModels: repair.models,
+      replacedWith: repair.with,
+    });
+    logAudit(null, 'system.model_roles_repaired', repair, null);
+  }
+}
 
 const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -241,6 +296,14 @@ ensureCert()
         console.log(`  On the network: https://${HOST}:${PORT}`);
       }
       logger.info('AMERB AI started', { port: PORT, host: HOST, pid: process.pid, node: process.versions.node, logFile: logger.LOG_FILE });
+      // The schema state in the structured log (the raw [database] lines above go to stderr before the
+      // logger exists): which migrations ran is part of knowing what version is actually serving.
+      try {
+        const { migrationStatus } = require('./migrations');
+        logger.info('Database schema', { migrations: migrationStatus(db) });
+      } catch (err) {
+        logger.warn('Could not report the database schema state', { reason: err.message });
+      }
       monitor.startSampler();
       // Keeps data/knowledge/<base>/ folders in step with the database (one copy per knowledge base).
       knowledgeFolders.startBackgroundSync();
@@ -251,6 +314,13 @@ ensureCert()
         // Builds meaning-based search for any documents not indexed yet, then keeps up with new ones.
         startBackgroundIndexing();
       }
+
+      // Model-role checks, once Ollama is reachable: the embedding model must really be an embedding
+      // model, and no saved conversation may still name an embedding model as its chat model (the bug of
+      // 20 Nov 2026, where nomic-embed-text was saved as a chat model and the app quietly answered with a
+      // different model). The repair is logged and audited — it is a correction of stored data, not a
+      // silent substitution at answer time.
+      verifyModelRoles().catch((err) => logger.warn('Could not verify model roles', { reason: err.message }));
     });
   })
   .catch((err) => {

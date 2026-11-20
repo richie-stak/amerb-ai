@@ -645,6 +645,7 @@ router.get('/audit/export.csv', (req, res) => {
 const monitor = require('../monitor');
 const logger = require('../logger');
 const modelRouting = require('../modelRouting');
+const modelCapabilities = require('../modelCapabilities');
 const llmLocal = require('../llm/ollama');
 const { listExternalModels } = require('../llm');
 
@@ -704,7 +705,15 @@ async function availableModelNames() {
     /* Ollama down — external models can still be routed to */
   }
   const external = listExternalModels();
-  return { local, external, names: [...local.map((m) => m.name), ...external.map((m) => m.name)] };
+  // Embedding models cannot answer chat, so they are not routable chat models. Offers made before this
+  // check existed are rejected by setRouting below with a message that says why.
+  const chatLocal = local.filter((m) => modelCapabilities.classifyChatModel(m.name) !== 'embedding');
+  return {
+    local: chatLocal,
+    external,
+    names: [...chatLocal.map((m) => m.name), ...external.map((m) => m.name)],
+    isChatModel: (name) => modelCapabilities.classifyChatModel(name) !== 'embedding',
+  };
 }
 
 router.get('/routing', asyncHandler(async (req, res) => {
@@ -721,9 +730,9 @@ router.get('/routing', asyncHandler(async (req, res) => {
 }));
 
 router.post('/routing', asyncHandler(async (req, res) => {
-  const { names } = await availableModelNames();
+  const { names, isChatModel } = await availableModelNames();
   try {
-    modelRouting.setRouting(req.body || {}, { known: names, departments: DEPARTMENTS });
+    modelRouting.setRouting(req.body || {}, { known: names, departments: DEPARTMENTS, isChatModel });
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
