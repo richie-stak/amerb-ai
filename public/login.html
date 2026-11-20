@@ -58,10 +58,26 @@ fetch('/api/session').then(r => r.json()).then(d => {
   if (d.authenticated) window.location.href = '/';
 });
 
+const params = new URLSearchParams(window.location.search);
+
 // The app sends people here when a request came back 401 (the session expired, or the app was opened
 // from a different address than the one they signed in on). Say so, instead of an unexplained login form.
-if (new URLSearchParams(window.location.search).get('reason') === 'session') {
+if (params.get('reason') === 'session') {
   showError('Your session has ended. Please sign in again.');
+}
+
+// A link may carry the address to sign in with, so it does not have to be typed or remembered:
+//   /login.html?identifier=radjei%40amenfimanbank.com
+// Only the *address* — a password is never accepted from the URL. A password in a URL ends up in browser
+// history, in any proxy's access log and in screenshots; the form keeps it in the request body instead.
+const prefill = params.get('identifier') || params.get('email') || params.get('u');
+if (prefill) {
+  document.getElementById('identifier').value = prefill;
+  document.getElementById('password').focus();
+}
+if (window.location.search) {
+  // Leave the query string behind: signing in should not also record who and where in the history.
+  window.history.replaceState({}, '', window.location.pathname);
 }
 
 form.addEventListener('submit', async (e) => {
