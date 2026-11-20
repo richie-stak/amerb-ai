@@ -66,7 +66,12 @@ function inlineScriptHashes(publicDir) {
     } catch {
       continue;
     }
-    for (const match of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+    // The HTML parser normalises CRLF to LF before the browser hashes an inline script, so the hash must
+    // be taken from the normalised text — otherwise a file saved with Windows line endings (which is what
+    // git does on this machine) gets a hash the browser will never match, and every inline script is
+    // blocked. This is what made the sign-in button do nothing.
+    const normalised = html.replace(/\r\n?/g, '\n');
+    for (const match of normalised.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
       const body = match[1];
       if (!body.trim()) continue;
       hashes.push(crypto.createHash('sha256').update(body, 'utf8').digest('base64'));

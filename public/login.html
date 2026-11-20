@@ -25,7 +25,9 @@
 
     <div class="auth-error" id="error"></div>
 
-    <form id="login-form">
+    <!-- method="post" is a safety net: the script signs in through the JSON API, but if it ever fails to
+     run the browser must not send the password as a GET query string into history. -->
+<form id="login-form" method="post" action="/login.html">
       <div class="field">
         <label for="identifier">Username or email</label>
         <input type="text" id="identifier" name="identifier" autocomplete="username" required>
