@@ -6,7 +6,7 @@ process.env.LOG_DIR = require('node:path').join(require('node:os').tmpdir(), `am
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { stripHtml, looksUnreadablePage, parseGoogleFinanceQuote } = require('../server/tools');
+const { stripHtml, looksUnreadablePage, parseGoogleFinanceQuote, parseBogRates } = require('../server/tools');
 
 test('a truncated page (cut inside a <style>) does not leak CSS as text', () => {
   // The reader stops at a byte cap, so a large page can end in the middle of a style block.
@@ -49,4 +49,16 @@ test('the Google Finance main quote is parsed from its label, not from a related
 
   // A page without the quote structure yields nothing rather than a wrong number.
   assert.equal(parseGoogleFinanceQuote('<html><body><p>No quote here</p></body></html>'), null);
+});
+
+test('the Bank of Ghana rates panel is parsed into the policy rate, T-bill and inflation target', () => {
+  const html =
+    '<div><h2 class="elementor-heading-title elementor-size-default"><a href="https://www.bog.gov.gh/monetary-policy/policy-rate-trends/">11.00</a></h2>' +
+    '<h2 class="elementor-heading-title elementor-size-default"><a href="https://www.bog.gov.gh/monetary-policy/policy-rate-trends/">Current Monetary Policy Rate (%)</a></h2></div>' +
+    '<div><h2 class="elementor-heading-title elementor-size-default"><a href="https://www.bog.gov.gh/treasury-and-the-markets/treasury-bill-rates/">4.5058</a></h2>' +
+    '<h2 class="elementor-heading-title elementor-size-default"><a href="https://www.bog.gov.gh/treasury-and-the-markets/treasury-bill-rates/">91-Day Treasury Bill Rate (%)</a></h2></div>' +
+    '<div><h2 class="elementor-heading-title elementor-size-default">8.0 ± 2</h2><h2 class="elementor-heading-title elementor-size-default">Inflation Target (%)</h2></div>';
+  assert.deepEqual(parseBogRates(html), { policyRate: '11.00', treasuryBill91: '4.5058', inflationTarget: '8.0 ± 2' });
+  // A page without the panel (or a restyle that loses the series links) yields nothing rather than a guess.
+  assert.equal(parseBogRates('<html><body><p>No rates here</p></body></html>'), null);
 });

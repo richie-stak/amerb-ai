@@ -417,6 +417,39 @@ function looksUnreadablePage(text) {
   );
 }
 
+// The Bank of Ghana publishes its current rates on the homepage. Pulls each figure out of the heading
+// markup that carries its label (the value is a link whose href names the series), so a page restyle that
+// keeps the labels still parses.
+function parseBogRates(html) {
+  const source = String(html || '');
+  const byHref = (pattern) => {
+    const match = new RegExp('href="[^"]*(?:' + pattern + ')[^"]*"[^>]*>\\s*([0-9][0-9.,]*)\\s*</a>', 'i').exec(source);
+    return match ? match[1].replace(/,/g, '') : null;
+  };
+  const rates = {
+    policyRate: byHref('policy-rate'),
+    treasuryBill91: byHref('treasury-bill'),
+  };
+  // "8.0 ± 2" sits in its own heading next to the label "Inflation Target (%)".
+  const target = /([0-9]+(?:\.[0-9]+)?)\s*±\s*([0-9]+(?:\.[0-9]+)?)/.exec(source);
+  if (target) rates.inflationTarget = `${target[1]} ± ${target[2]}`;
+  // The Bank's own "policy rate" label confirms the page really is the rates panel.
+  if (!rates.policyRate && !rates.treasuryBill91) return null;
+  return rates;
+}
+
+function bogRatesText(rates, sourceUrl) {
+  const parts = [];
+  if (rates.policyRate) parts.push(`Monetary Policy Rate ${rates.policyRate}%`);
+  if (rates.treasuryBill91) parts.push(`91-Day Treasury Bill ${rates.treasuryBill91}%`);
+  if (rates.inflationTarget) parts.push(`inflation target ${rates.inflationTarget}%`);
+  const fetchedAt = new Date().toUTCString();
+  return (
+    `Bank of Ghana — current rates (fetched ${fetchedAt} from ${new URL(sourceUrl).hostname}): ${parts.join(', ')}. ` +
+    'These are the Bank of Ghana\'s published figures; quote them as such and do not present them as the bank\'s own product rates.'
+  );
+}
+
 // Google Finance server-renders a currency quote into its HTML:
 //   <div class="gO24Ff">United States Dollar / Ghanaian Cedi</div> … <span jsname="Pdsbrc"><span>11.7666</span>
 // Returns { pair, rate, label } or null when the page is not a readable quote.
@@ -526,6 +559,13 @@ async function fetchUrl(rawUrl, extraAllowed) {
             sourceUrl: current.href,
           };
         }
+      }
+
+      // The Bank of Ghana homepage is the primary source for the national rates; return the figures as one
+      // line rather than a page of navigation, so a policy-rate question is answered from one fetch.
+      if (contentType.includes('html') && /(^|\.)bog\.gov\.gh$/i.test(current.hostname)) {
+        const bog = parseBogRates(text);
+        if (bog) return { kind: 'text', text: bogRatesText(bog, current.href), sourceUrl: current.href };
       }
 
       const plain = contentType.includes('html') ? decodeEntities(stripHtml(text)) : text.trim();
@@ -1153,6 +1193,7 @@ module.exports = {
   webSearch,
   isPrivateOrReservedIp,
   parseGoogleFinanceQuote,
+  parseBogRates,
   stripHtml: (html) => decodeEntities(stripHtml(html)),
   looksUnreadablePage,
 };

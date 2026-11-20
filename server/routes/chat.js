@@ -26,6 +26,30 @@ const MAX_TOOL_ROUNDS = 4;
 // Room left in the context window for the model's own reply, and for the tool schemas it's offered.
 const REPLY_RESERVE_TOKENS = 2048;
 const TOOL_DEFS_TOKENS = Math.ceil(JSON.stringify(TOOL_DEFS).length / 3.5);
+// Is this asking for a live rate/price (exchange rate, interest rate, a currency conversion) rather than
+// about a policy? A rate is market data from a live source, not something the bank's policy documents
+// contain — attaching policy citations to it is misleading. "… interest rate policy" stays a policy
+// question (it asks what the bank's rule says).
+const CURRENCY_TOPIC = /\b(exchange[- ]?rate|currency|currencies|forex|fx|cedi|cedis|dollar|dollars|usd|ghs|eur|gbp|convert|conversion)\b/i;
+const INTEREST_TOPIC = /\b(interest[- ]?rate|policy rate|treasury[- ]?bill|mpr)\b/i;
+// The bank's own product rates (savings, loans, deposits…) are answered by its documents, not by a market feed.
+const INTERNAL_PRODUCT = /\b(savings|saving|loan|loans|deposit|deposits|account|accounts|credit|overdraft)\b/i;
+// Market-facing phrasing: the national/central-bank rate, "today's rate", "current rate in Ghana".
+const MARKET_CONTEXT = /\b(current|today|latest|now|bank of ghana|bog|ghana|national|central bank|market|inflation|treasury)\b/i;
+const POLICY_WORD = /\bpolicy\b/i;
+
+function isLiveRateQuestion(text) {
+  const value = String(text || '');
+  if (!value.trim() || value.length > 300) return false;
+  // A policy question ("our interest rate policy") is answered from the documents.
+  if (POLICY_WORD.test(value) && !/\bpolicy rate\b/i.test(value)) return false;
+  // A currency/exchange-rate question is always live market data.
+  if (CURRENCY_TOPIC.test(value)) return true;
+  if (!INTEREST_TOPIC.test(value)) return false;
+  // An interest rate about one of the bank's products is internal data; a national/market rate is live data.
+  return !INTERNAL_PRODUCT.test(value) && MARKET_CONTEXT.test(value);
+}
+
 // The exchange-rate tool is only offered when an administrator has switched it on.
 
 // A rough token estimate (~3.5 characters per token for English) — close enough to budget a
@@ -316,11 +340,14 @@ async function runAssistantTurn(
 
   // Only auto-retrieved sources become "citations" — explicitly attached documents are already
   // visible as attachment chips on the user's own message, so citing them again would be noise.
-  const { text: autoContext, sources: citations } = await getHybridContext(
-    user,
-    searchQuery,
-    attachedDocs.map((d) => d.id)
-  );
+  //
+  // A live rate question is answered by the exchange-rate tool (and possibly a web/finance lookup), not by
+  // the bank's policy library: retrieving policy chunks for "what is the cedi to dollar rate" only produced
+  // irrelevant citations and could tempt the model into quoting a policy document as the source of a rate.
+  const liveRateQuestion = isLiveRateQuestion(lastUserContent) && !attachedDocs.length;
+  const { text: autoContext, sources: citations } = liveRateQuestion
+    ? { text: '', sources: [] }
+    : await getHybridContext(user, searchQuery, attachedDocs.map((d) => d.id));
 
   // Nothing in the knowledge bases answered this: look in the websites the bank has approved. Only
   // the approved domains are searched (never the open web), the question is not sent anywhere else,
@@ -357,6 +384,9 @@ async function runAssistantTurn(
         (isExchangeRateEnabled()
           ? ' For any exchange-rate or currency-conversion question, call the exchange_rate tool and give the rate with its date and source — never guess one.'
           : '') +
+        ' Exchange rates, interest rates and other market figures are live data: take them only from the ' +
+        'tools or a fetched page, never from the bank\'s policy documents, and never cite a policy document ' +
+        'as the source of a rate.' +
         ' If a web search returns no results or fails, say plainly that the search was run and what came back (for example that the search service refused the request), and never claim to have live data you do not have.',
     },
   ];
@@ -456,6 +486,7 @@ async function runAssistantTurn(
   // Declared outside the try so the reply-guarantee block after it can still see them (they are
   // filled in inside it).
   let rateLookup = null;
+  let bogLookup = '';
   let forcedSearchFailure = null;
   let directRateAnswer = false;
   const generatedAttachments = [];
@@ -588,6 +619,33 @@ async function runAssistantTurn(
           sendEvent(res, 'tool', { name: 'exchange_rate', args: request, status: 'done', result: `Error: ${err.message}` });
           rateLookup = { args: request, text: err.message, figures: [], failed: true };
         }
+      }
+    }
+
+    // A market interest-rate question ("what is the current policy rate?") is answered from the primary
+    // source: the Bank of Ghana's own homepage carries the current policy rate, 91-day T-bill rate and
+    // inflation target in its HTML. Fetching it once here means the model does not spend a minute opening
+    // BoG pages looking for a number (and the answer does not carry internal policy citations).
+    if (isLiveRateQuestion(lastUserContent) && !parseCurrencyRequest(lastUserContent)) {
+      sendEvent(res, 'tool', { name: 'fetch_url', args: { url: 'https://www.bog.gov.gh/' }, status: 'running' });
+      try {
+        const { text: bogText } = await executeTool('fetch_url', { url: 'https://www.bog.gov.gh/' }, toolContext);
+        sendEvent(res, 'tool', { name: 'fetch_url', args: { url: 'https://www.bog.gov.gh/' }, status: 'done', result: String(bogText).slice(0, 300) });
+        if (/^Bank of Ghana — current rates/.test(String(bogText))) {
+          bogLookup = String(bogText);
+          messagesForModel.push({
+            role: 'system',
+            content:
+              'The Bank of Ghana rate the user asked about has already been looked up for you — do not fetch ' +
+              'more pages and do not guess. Here it is:\n\n' +
+              bogLookup +
+              '\n\nAnswer concisely with these figures, name the Bank of Ghana as the source and date, and note ' +
+              'that these are the Bank\'s published national rates, not the bank\'s own lending or deposit rates. ' +
+              'Reply in the language you are answering in.',
+          });
+        }
+      } catch (err) {
+        sendEvent(res, 'tool', { name: 'fetch_url', args: { url: 'https://www.bog.gov.gh/' }, status: 'done', result: `Error: ${err.message}` });
       }
     }
 

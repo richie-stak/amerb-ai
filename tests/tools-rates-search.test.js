@@ -354,3 +354,42 @@ test('a rejected API key is reported clearly instead of "no rates"', async () =>
     db2.close();
   }
 });
+
+test('a live rate question carries no bank-policy citations', async () => {
+  // A rate is market data, not a policy: retrieval used to attach (and cite) policy documents to these
+  // questions, which made it look as though the rate came from the bank's own documents.
+  const db = server.openDb();
+  db.prepare(
+    "INSERT INTO app_settings (key, value) VALUES ('exchange_rate_enabled', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'"
+  ).run();
+  db.prepare("UPDATE app_settings SET value = ? WHERE key = 'exchange_rate_url'").run(rateService.url);
+  // A policy document that mentions rates, so retrieval would previously have matched (and cited) it.
+  const { BANKWIDE_DEPARTMENT } = require('../server/departments');
+  const doc = db
+    .prepare(
+      "INSERT INTO documents (user_id, department, filename, mime_type, kind, is_personal, char_count) VALUES (1, ?, 'Interest Rate Policy.pdf', 'application/pdf', 'pdf', 0, 120)"
+    )
+    .run(BANKWIDE_DEPARTMENT);
+  db.prepare('INSERT INTO document_chunks (document_id, chunk_index, content) VALUES (?, 0, ?)').run(
+    doc.lastInsertRowid,
+    'The interest rate policy sets out how interest rates are approved by the bank and reviewed by the committee.'
+  );
+  db.close();
+
+  const staff = await signup('ratecitations');
+
+  const currency = await chat(staff, 'what is the current cedi to dollar conversion');
+  const currencyMeta = currency.find((e) => e.event === 'meta')?.data || {};
+  assert.deepEqual(currencyMeta.citations || [], [], 'a currency answer cites no internal documents');
+  const currencyAnswer = currency.filter((e) => e.event === 'token').map((e) => e.data.delta).join('');
+  assert.match(currencyAnswer, /0\.0862/, 'the rate itself is still answered');
+
+  const interest = await chat(staff, 'what is the current interest rate in Ghana');
+  const interestMeta = interest.find((e) => e.event === 'meta')?.data || {};
+  assert.deepEqual(interestMeta.citations || [], [], 'an interest-rate answer cites no policy document');
+
+  // Sanity: a genuinely policy-shaped question is still answered from the documents, citations included.
+  const policy = await chat(staff, 'what does our interest rate policy say about approving rates');
+  const policyMeta = policy.find((e) => e.event === 'meta')?.data || {};
+  assert.ok((policyMeta.citations || []).length >= 1, 'policy questions keep their citations');
+});
