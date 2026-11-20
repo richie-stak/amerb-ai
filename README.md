@@ -201,6 +201,17 @@ The first account is not automatically an admin — promote your first admin man
 - **@-mention a document** — typing `@` in the composer brings up an autocomplete of documents visible to you (your department's uploads, plus bank-wide ones); picking one attaches it to the message the same way the paperclip button does.
 - **Voice input** (mic button in the composer) — speech-to-text runs entirely locally via a small Whisper model (`@xenova/transformers`, ONNX + WASM, no native build step). The model itself (~40MB) downloads once from Hugging Face on first use, the same one-time-download-then-fully-offline pattern as `ollama pull` — after that, transcription never leaves the machine, unlike the browser's own built-in speech recognition, which would send audio to a cloud provider.
 
+## Document branding
+
+Every Word, PDF, Excel and PowerPoint file AMERB AI generates carries the bank's logo: at the top of the
+first page for Word and PDF, above the table for Excel, and on the title slide plus each content slide for
+PowerPoint. Headings and table header rows use the bank's dark green.
+
+The logo is a file in the repository — ssets/branding/community-bank-logo.png, the 2118×405 Amenfiman
+Community Bank logo — so it travels with the app to another machine or container. AMERB_LOGO_PATH in
+.env can point at a different logo on one installation (it must be a PNG; its dimensions are read from the
+file and its aspect ratio is preserved). If the file is missing, documents are still generated, simply
+without a logo — a missing asset never fails a tool call.
 ## Database: migrations, backups and integrity
 
 The schema is versioned. Every change is a numbered, named migration in `server/migrations.js`, applied
