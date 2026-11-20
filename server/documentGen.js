@@ -7,6 +7,19 @@ const { getLogo, sizedFor, BANK_NAME, BRAND_GREEN } = require('./branding');
 
 const HEADING_LEVELS = [HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.HEADING_3];
 
+// Splits a line of text into { text, bold } runs on **bold** markers. Unbalanced markers are left as
+// written rather than swallowed.
+function inlineRuns(text) {
+  const runs = [];
+  const parts = String(text || '').split(/(\*\*[^*]+\*\*)/g);
+  for (const part of parts) {
+    if (!part) continue;
+    const bold = /^\*\*[^*]+\*\*$/.test(part);
+    runs.push({ text: bold ? part.slice(2, -2) : part, bold });
+  }
+  return runs.length ? runs : [{ text: String(text || ''), bold: false }];
+}
+
 function splitTableRow(line) {
   return line
     .trim()
@@ -35,6 +48,12 @@ function parseBlocks(text) {
     const bullet = line.match(/^[-*]\s+(.*)$/);
     if (bullet) {
       blocks.push({ type: 'bullet', text: bullet[1] });
+      continue;
+    }
+
+    // A horizontal rule (--- / *** / ___) is a divider, not text to print.
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line)) {
+      blocks.push({ type: 'rule' });
       continue;
     }
 
@@ -120,12 +139,32 @@ async function generateDocx(title, content) {
         ];
       }
       if (b.type === 'bullet') {
-        return [new Paragraph({ children: [new TextRun(b.text)], bullet: { level: 0 }, spacing: { after: 80 } })];
+        return [
+          new Paragraph({
+            children: inlineRuns(b.text).map((run) => new TextRun({ text: run.text, bold: run.bold })),
+            bullet: { level: 0 },
+            spacing: { after: 80 },
+          }),
+        ];
+      }
+      if (b.type === 'rule') {
+        return [
+          new Paragraph({
+            text: '',
+            border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: 'CCCCCC' } },
+            spacing: { before: 120, after: 160 },
+          }),
+        ];
       }
       if (b.type === 'table') {
         return [buildDocxTable(b.headers, b.rows), new Paragraph({ text: '', spacing: { after: 160 } })];
       }
-      return [new Paragraph({ children: [new TextRun(b.text)], spacing: { after: 120 } })];
+      return [
+        new Paragraph({
+          children: inlineRuns(b.text).map((run) => new TextRun({ text: run.text, bold: run.bold })),
+          spacing: { after: 120 },
+        }),
+      ];
     }),
   ];
   const doc = new Document({ sections: [{ children }] });
@@ -196,11 +235,27 @@ function generatePdf(title, content) {
         doc.fillColor('black');
         doc.moveDown(0.2);
       } else if (b.type === 'bullet') {
-        doc.fontSize(12).text(`•  ${b.text}`, { indent: 18 });
+        doc.fontSize(12).font('Helvetica');
+        doc.text('•  ', { indent: 18, continued: true });
+        for (const run of inlineRuns(b.text)) {
+          doc.font(run.bold ? 'Helvetica-Bold' : 'Helvetica').text(run.text, { continued: true });
+        }
+        doc.text(' ');
+      } else if (b.type === 'rule') {
+        const y = doc.y + 6;
+        doc.moveTo(doc.page.margins.left, y).lineTo(doc.page.width - doc.page.margins.right, y).strokeColor('#cccccc').lineWidth(0.7).stroke();
+        doc.strokeColor('black');
+        doc.y = y + 10;
       } else if (b.type === 'table') {
         drawPdfTable(doc, b.headers, b.rows);
       } else {
-        doc.fontSize(12).text(b.text);
+        doc.fontSize(12);
+        for (const run of inlineRuns(b.text)) {
+          doc.font(run.bold ? 'Helvetica-Bold' : 'Helvetica');
+          doc.text(run.text, { continued: true });
+        }
+        doc.text(' ');
+        doc.font('Helvetica');
         doc.moveDown(0.3);
       }
     }
@@ -211,6 +266,11 @@ function generatePdf(title, content) {
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
       const bottom = doc.page.height - doc.page.margins.bottom + 18;
+      // The footer deliberately sits inside the bottom margin. pdfkit treats text past the bottom margin as
+      // an overflow and starts a new page for it, which is why every PDF used to come out with two blank
+      // pages at the end (one per footer text). Disable the margin while writing the footer, then restore it.
+      const bottomMargin = doc.page.margins.bottom;
+      doc.page.margins.bottom = 0;
       doc.fontSize(8).fillColor('#888888');
       doc.text('Amenfiman Community Bank — AMERB AI', doc.page.margins.left, bottom, {
         width: doc.page.width - doc.page.margins.left - doc.page.margins.right - 80,
@@ -219,6 +279,7 @@ function generatePdf(title, content) {
         width: 80,
         align: 'right',
       });
+      doc.page.margins.bottom = bottomMargin;
     }
 
     doc.end();

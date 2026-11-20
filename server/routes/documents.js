@@ -333,15 +333,25 @@ router.get('/:id/file', (req, res) => {
 // javascript:/data: links (a spreadsheet cell with a hyperlink is enough to produce one). The CSP would
 // block execution anyway; this is the layer that means one CSP change cannot turn into an XSS.
 function sanitisePreviewHtml(html) {
-  return String(html || '')
-    .replace(/<script[\s\S]*?<\/script\s*>/gi, '')
-    .replace(/<(iframe|object|embed|link|meta|base|form)[\s\S]*?>/gi, '')
-    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/\s(href|src|action)\s*=\s*("|')\s*(javascript|data|vbscript):[^"']*\2/gi, ' $1="#"')
-    .replace(/\s(href|src|action)\s*=\s*(javascript|data|vbscript):[^\s>]*/gi, ' $1="#"');
-}
-
-router.get('/:id/preview', asyncHandler(async (req, res) => {
+  return (
+    String(html || '')
+      .replace(/<script[\s\S]*?<\/script\s*>/gi, '')
+      .replace(/<(iframe|object|embed|link|meta|base|form)[\s\S]*?>/gi, '')
+      .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      // Links may not carry a script or an arbitrary data payload.
+      .replace(/\s(href|action)\s*=\s*("|')\s*(?:javascript|vbscript|data):[^"']*\2/gi, ' $1="#"')
+      .replace(/\s(href|action)\s*=\s*(?:javascript|vbscript|data):[^\s>]*/gi, ' $1="#"')
+      // Images keep their image data URI (a Word document's logo arrives from mammoth as
+      // src="data:image/png;base64,…") and relative paths; javascript:/vbscript: and non-image data:
+      // payloads are replaced. SVG data URIs are deliberately excluded — SVG can carry script. The page's
+      // own Content-Security-Policy (img-src 'self' data: blob:) decides what a browser will actually load.
+      .replace(
+        /\ssrc\s*=\s*("|')\s*(?:javascript|vbscript|data:(?!image\/(?:png|jpe?g|gif|webp|bmp);))[^"']*\1/gi,
+        ' src="#"'
+      )
+      .replace(/\s(src)\s*=\s*(?:javascript|vbscript|data:(?!image\/(?:png|jpe?g|gif|webp|bmp);))[^\s>]*/gi, ' $1="#"')
+  );
+}router.get('/:id/preview', asyncHandler(async (req, res) => {
   const user = currentUser(req);
   const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Document not found' });
@@ -375,7 +385,13 @@ router.get('/:id/preview', asyncHandler(async (req, res) => {
       const workbook = XLSX.read(buffer, { type: 'buffer' });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
       const html = XLSX.utils.sheet_to_html(firstSheet);
-      return res.json({ type: 'html', html: sanitisePreviewHtml(html) });
+      // SheetJS renders cells only, so the drawing (the bank logo) would vanish from the preview. The logo
+      // is inserted above the table the same way the generated workbook has it.
+      const logo = require('../branding').sizedFor(240);
+      const logoHtml = logo
+        ? `<p class="preview-logo"><img alt="Amenfiman Community Bank" src="data:image/png;base64,${logo.logo.buffer.toString('base64')}" style="width:${logo.width}px;height:${logo.height}px" /></p>`
+        : '';
+      return res.json({ type: 'html', html: sanitisePreviewHtml(logoHtml + html) });
     }
     if (doc.kind === 'pptx' || doc.kind === 'text' || doc.kind === 'webpage') {
       return res.json({ type: 'text', text: chunkTextFor(doc.id) || '(No extracted text available.)' });

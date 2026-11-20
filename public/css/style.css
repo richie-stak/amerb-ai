@@ -1772,6 +1772,19 @@ a {
   line-height: 1.6;
 }
 
+.preview-html img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 0 12px;
+}
+
+.preview-logo img {
+  max-width: 220px;
+  height: auto;
+  margin-bottom: 10px;
+}
+
 .preview-html table {
   border-collapse: collapse;
   width: 100%;
