@@ -463,7 +463,13 @@ async function runAssistantTurn(
   // fetchable via fetch_url later in the same turn without needing admin pre-approval.
   const toolContext = { user, unlockedDomains: new Set() };
   for (const site of policyFallback?.sites || []) toolContext.unlockedDomains.add(site);
-  const effectiveForceWebSearch = forceWebSearch || ONLINE_SEARCH_INTENT.test(lastUserContent);
+  // A currency question that names Google is answered with two figures (the bank's configured rate and
+  // Google Finance's quote), so it must not be downgraded to a free-text web search — that path skipped the
+  // rate lookup and produced "the search returned no results, I have no live data".
+  const currencyRequestEarly = isExchangeRateEnabled() ? parseCurrencyRequest(lastUserContent) : null;
+  const googleCrossCheckRequested = Boolean(currencyRequestEarly && /\bgoogle\b/i.test(lastUserContent));
+  const effectiveForceWebSearch =
+    (forceWebSearch || ONLINE_SEARCH_INTENT.test(lastUserContent)) && !googleCrossCheckRequested;
   // Tracks whether a real web_search happened this turn (forced or autonomous), so the corrective
   // retry below only fires when the model genuinely never looked anything up.
   let searchedThisTurn = effectiveForceWebSearch || Boolean(policyFallback && !policyFallback.error);
@@ -535,7 +541,7 @@ async function runAssistantTurn(
     // sure the rate actually reached the person.
     // The user asking to search gets a search — the deterministic rate answer would otherwise swallow a
     // perfectly explicit "search for the current rate".
-    if (isExchangeRateEnabled() && !effectiveForceWebSearch) {
+    if (isExchangeRateEnabled() && (!effectiveForceWebSearch || googleCrossCheckRequested)) {
       const request = parseCurrencyRequest(lastUserContent);
       if (request) {
         sendEvent(res, 'tool', { name: 'exchange_rate', args: request, status: 'running' });
@@ -544,6 +550,28 @@ async function runAssistantTurn(
           sendEvent(res, 'tool', { name: 'exchange_rate', args: request, status: 'done', result: String(resultText).slice(0, 500) });
           rateLookup = { args: request, text: String(resultText), figures: [], failed: /^(Error|could not get an exchange rate)/i.test(String(resultText)) };
           if (!rateLookup.failed) {
+            // "check on google.com" means an independent quote, fetched now — not a stored page from an
+            // earlier attempt. Google Finance serves the pair's figure in its HTML; fetchUrl returns it as
+            // one clean line (or an explicit "unreadable", which is reported rather than guessed).
+            if (/\bgoogle\b/i.test(lastUserContent)) {
+              sendEvent(res, 'tool', { name: 'fetch_url', args: { url: `https://www.google.com/finance/quote/${request.from}-${request.to}` }, status: 'running' });
+              try {
+                const { text: googleText } = await executeTool(
+                  'fetch_url',
+                  { url: `https://www.google.com/finance/quote/${request.from}-${request.to}` },
+                  toolContext
+                );
+                sendEvent(res, 'tool', { name: 'fetch_url', args: { url: `https://www.google.com/finance/quote/${request.from}-${request.to}` }, status: 'done', result: String(googleText).slice(0, 300) });
+                if (/^Google Finance —/.test(String(googleText))) {
+                  rateLookup.text += ` Google Finance (independent check): ${String(googleText).replace(/^Google Finance — /, '')}`;
+                  rateLookup.googleCheck = String(googleText).replace(/^Google Finance — /, '');
+                } else {
+                  rateLookup.googleCheck = 'could not be read';
+                }
+              } catch (err) {
+                rateLookup.googleCheck = `could not be read (${err.message})`;
+              }
+            }
             rateLookup.figures = rateFigures(rateLookup.text);
             directRateAnswer = isSimpleRateQuestion(lastUserContent, request);
             messagesForModel.push({

@@ -373,20 +373,67 @@ function pinnedDispatcher(address, family) {
   });
 }
 
+// Entities a page actually uses: numeric ones (&#8211;, &#x2019;) and the common named ones. Pages such as
+// bankofghana.org use numeric entities heavily, and leaving them encoded made the text look broken.
+const NAMED_ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', lsquo: '‘',
+  rsquo: '’', ldquo: '“', rdquo: '”', hellip: '…', euro: '€', pound: '£', cent: '¢', deg: '°', times: '×',
+  middot: '·', bull: '•', copy: '©', reg: '®', trade: '™',
+};
+
+function decodeEntities(text) {
+  return text.replace(/&(#x?[0-9a-f]+|[a-z][a-z0-9]+);/gi, (whole, body) => {
+    if (body[0] === '#') {
+      const code = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+    }
+    return NAMED_ENTITIES[body.toLowerCase()] || whole;
+  });
+}
+
 function stripHtml(html) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
+  return (
+    String(html || '')
+      // A truncated page may end inside a <script>/<style> block, so the closing tag never arrives: the
+      // "rest of the document" form is removed too. Without this the CSS of a large page became its text.
+      .replace(/<script\b[\s\S]*?<\/script\s*>/gi, ' ')
+      .replace(/<style\b[\s\S]*?<\/style\s*>/gi, ' ')
+      .replace(/<script\b[\s\S]*$/i, ' ')
+      .replace(/<style\b[\s\S]*$/i, ' ')
+      .replace(/<noscript\b[\s\S]*?<\/noscript\s*>/gi, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
+}
+
+// Text that is not really a page's content: a JavaScript/redirect stub, a consent wall, a bot check.
+function looksUnreadablePage(text) {
+  const value = String(text || '').trim();
+  if (value.length < 150) return true;
+  return /not redirected|enable javascript|javascript is (required|disabled)|please click here|accept (all )?cookies|consent|unusual traffic|captcha|verify you are human|access denied|are you a robot/i.test(
+    value.slice(0, 600)
+  );
+}
+
+// Google Finance server-renders a currency quote into its HTML:
+//   <div class="gO24Ff">United States Dollar / Ghanaian Cedi</div> … <span jsname="Pdsbrc"><span>11.7666</span>
+// Returns { pair, rate, label } or null when the page is not a readable quote.
+function parseGoogleFinanceQuote(html) {
+  const source = String(html || '');
+  // The main quote is the only currency-pair label on the page, and its price is the first Pdsbrc span
+  // *after* that label. Taking the first Pdsbrc span in the document instead picked a related-quote figure
+  // (1,049.19 rather than 11.7666).
+  const labelMatch = /<div[^>]*class="gO24Ff"[^>]*>([^<]{2,80})<\/div>/i.exec(source);
+  if (!labelMatch) return null;
+  const label = labelMatch[1].trim();
+  const afterLabel = source.slice(labelMatch.index);
+  const priceMatch = /<span[^>]*jsname="Pdsbrc"[^>]*>\s*<span[^>]*>\s*([0-9][0-9.,]*)\s*<\/span>/i.exec(afterLabel);
+  if (!priceMatch) return null;
+  const rate = Number(priceMatch[1].replace(/,/g, ''));
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+  return { label, rate };
 }
 
 async function fetchUrl(rawUrl, extraAllowed) {
@@ -445,6 +492,10 @@ async function fetchUrl(rawUrl, extraAllowed) {
         return { kind: 'image', buffer: Buffer.concat(chunks), contentType, sourceUrl: current.href };
       }
 
+      // A Google Finance quote page is ~1.2 MB and carries the figure deep in the markup, so the general
+      // 300 KB page cap would cut it off before the quote (which made it look like an unreadable page).
+      const isGoogleFinanceQuote = /(^|\.)google\.com$/i.test(current.hostname) && current.pathname.startsWith('/finance/quote/');
+      const byteCap = isGoogleFinanceQuote ? 5_000_000 : MAX_FETCH_BYTES;
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let text = '';
@@ -454,13 +505,42 @@ async function fetchUrl(rawUrl, extraAllowed) {
         if (done) break;
         bytes += value.length;
         text += decoder.decode(value, { stream: true });
-        if (bytes >= MAX_FETCH_BYTES) {
+        if (bytes >= byteCap) {
           controller.abort();
           break;
         }
       }
 
-      const plain = contentType.includes('html') ? stripHtml(text) : text.trim();
+      // Google Finance quotes a currency pair in its server-rendered HTML; return that as one clean line
+      // instead of a page of navigation chrome (and never as a wall of CSS).
+      if (contentType.includes('html') && /(^|\.)google\.com$/i.test(current.hostname) && current.pathname.startsWith('/finance/quote/')) {
+        const quote = parseGoogleFinanceQuote(text);
+        if (quote) {
+          const fetchedAt = new Date().toUTCString();
+          const pair = decodeURIComponent(current.pathname.replace('/finance/quote/', '')).replace('-', '/');
+          return {
+            kind: 'text',
+            text:
+              `Google Finance — ${quote.label}: ${quote.rate} (fetched ${fetchedAt}; the pair ${pair} on google.com). ` +
+              "This is Google's own third-party quote, not an interbank or Bank of Ghana rate — say so if you quote it.",
+            sourceUrl: current.href,
+          };
+        }
+      }
+
+      const plain = contentType.includes('html') ? decodeEntities(stripHtml(text)) : text.trim();
+      // A page that is only a JavaScript/redirect/consent stub is not content: say so plainly rather than
+      // handing the model something it cannot use (or worse, CSS).
+      if (contentType.includes('html') && looksUnreadablePage(plain)) {
+        return {
+          kind: 'text',
+          text:
+            `Error: ${current.hostname} returned a page that cannot be read as text (` +
+            'a JavaScript-only page, a redirect or a consent wall). Nothing on it can be quoted — do not ' +
+            'guess a figure from it. Try a different page or source.',
+          sourceUrl: current.href,
+        };
+      }
       return { kind: 'text', text: plain.slice(0, MAX_RETURNED_CHARS), sourceUrl: current.href };
     } finally {
       dispatcher.close().catch(() => {});
@@ -1066,4 +1146,13 @@ function toolDefs() {
   return isExchangeRateEnabled() ? [...TOOL_DEFS, EXCHANGE_RATE_TOOL] : TOOL_DEFS;
 }
 
-module.exports = { TOOL_DEFS, toolDefs, executeTool, webSearch, isPrivateOrReservedIp };
+module.exports = {
+  TOOL_DEFS,
+  toolDefs,
+  executeTool,
+  webSearch,
+  isPrivateOrReservedIp,
+  parseGoogleFinanceQuote,
+  stripHtml: (html) => decodeEntities(stripHtml(html)),
+  looksUnreadablePage,
+};
