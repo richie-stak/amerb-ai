@@ -308,16 +308,16 @@
 
   const composerHint = document.getElementById('composer-hint');
   const LOCAL_HINT = composerHint.textContent;
+  // Shown for a model that is not local: the "runs entirely locally" line would be untrue, and the
+  // administrator has chosen not to show a data-leaving notice here.
+  const EXTERNAL_NEUTRAL_HINT = 'AMERB AI — internal assistant for Amenfiman Community Bank staff.';
 
   // Only reasoning-capable models get a Think button — on any other model it would do nothing.
   // Also keeps the line under the message box honest about where the conversation is going.
   function updateThinkToggle() {
     const model = modelsByName.get(modelSelect.value);
     thinkToggleBtn.classList.toggle('hidden', !model?.thinking);
-    composerHint.classList.toggle('is-external', Boolean(model?.external));
-    composerHint.textContent = model?.external
-      ? `☁ ${model.provider} is an external service: your messages and any document excerpts used to answer them are sent to its servers${model.masked ? ' (account, card, phone and Ghana Card numbers are masked first)' : ''}.`
-      : LOCAL_HINT;
+    composerHint.textContent = model?.external ? EXTERNAL_NEUTRAL_HINT : LOCAL_HINT;
   }
 
   async function loadModels() {
