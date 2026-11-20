@@ -92,3 +92,55 @@ test('an admin resetting a locked account\'s password also clears the lock', asy
     db.close();
   }
 });
+
+test('a renamed account can still sign in with its old address, without shadowing real identifiers', async () => {
+  const db = server.openDb();
+  try {
+    const client = makeClient(server.baseUrl);
+    const signup = await client.post('/api/auth/signup', {
+      username: 'renamedadmin',
+      email: 'renamedadmin@amenfimanbank.com',
+      password: 'password12345',
+      department: 'IT',
+    });
+    assert.equal(signup.status, 200);
+    const user = db.prepare('SELECT id FROM users WHERE username = ?').get('renamedadmin');
+    db.prepare("UPDATE users SET email = 'renamedadmin@amenfimanbank.local' WHERE id = ?").run(user.id);
+    // The browser still has the old address saved.
+    db.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('login_aliases', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).run(JSON.stringify({ 'renamedadmin@amenfimanbank.com': user.id, 'nobody@amenfimanbank.com': 999999 }));
+    await client.post('/api/auth/logout');
+
+    const viaAlias = await makeClient(server.baseUrl).post('/api/auth/login', {
+      identifier: 'renamedadmin@amenfimanbank.com',
+      password: 'password12345',
+    });
+    assert.equal(viaAlias.status, 200, 'the old saved address still signs in to the same account');
+    assert.equal((await viaAlias.json()).user.username, 'renamedadmin');
+
+    const viaNewEmail = await makeClient(server.baseUrl).post('/api/auth/login', {
+      identifier: 'renamedadmin@amenfimanbank.local',
+      password: 'password12345',
+    });
+    assert.equal(viaNewEmail.status, 200, 'the current address works too');
+
+    const wrongPassword = await makeClient(server.baseUrl).post('/api/auth/login', {
+      identifier: 'renamedadmin@amenfimanbank.com',
+      password: 'not-the-password',
+    });
+    assert.equal(wrongPassword.status, 401, 'an alias is not a bypass');
+
+    const danglingAlias = await makeClient(server.baseUrl).post('/api/auth/login', {
+      identifier: 'nobody@amenfimanbank.com',
+      password: 'password12345',
+    });
+    assert.equal(danglingAlias.status, 401, 'an alias pointing at no account cannot be used');
+
+    // The alias use is recorded, so an auditor can see which address was submitted.
+    const row = db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'auth.login_alias_used'").get();
+    assert.ok(row.n >= 1, 'alias sign-ins are audited');
+  } finally {
+    db.close();
+  }
+});

@@ -121,9 +121,25 @@ router.post('/login', asyncHandler(async (req, res) => {
   }
 
   const clean = identifier.trim().toLowerCase();
-  const user = db
+  let user = db
     .prepare('SELECT * FROM users WHERE username = ? OR email = ?')
     .get(identifier.trim(), clean);
+
+  // A renamed address (or the browser's saved login) can still name an existing account: an explicit
+  // alias decides which account it means. Only consulted when the normal lookup found nothing, so a real
+  // username or e-mail always wins.
+  if (!user) {
+    try {
+      const aliases = JSON.parse(db.prepare("SELECT value FROM app_settings WHERE key = 'login_aliases'").get()?.value || '{}');
+      const aliasUserId = aliases[clean];
+      if (aliasUserId) {
+        user = db.prepare('SELECT * FROM users WHERE id = ?').get(aliasUserId);
+        if (user) logAudit(req, 'auth.login_alias_used', { identifier: identifier.trim() }, user);
+      }
+    } catch {
+      /* a malformed alias map simply means no aliases */
+    }
+  }
 
   if (!user) {
     // Burn the same time a real comparison would, so response time does not reveal whether the
